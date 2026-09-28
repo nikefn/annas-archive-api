@@ -20,6 +20,8 @@ api/bearer.js         Shared `Authorization: Bearer` parsing for both handlers
 public/index.html     Entire frontend (HTML + CSS + vanilla JS, no build)
 dev.mjs               Express server wiring (static + api/ routes)
 test/parse.test.mjs   Parser tests using saved fixture HTML
+lib/bookmarks.js      Bookmark-export parser (pure)
+scripts/queue-bookmarks.mjs  CLI: bookmarks.html -> queue -> sequential downloads
 ```
 
 The handlers in `api/` must stay framework-agnostic (`req.query` in, `res.status().json()` out). All real logic belongs in `lib/annas.js`.

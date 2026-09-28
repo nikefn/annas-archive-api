@@ -19,3 +19,6 @@ Thumbs.db
 *.tar
 *.tar.gz
 
+
+# Local download queue from scripts/queue-bookmarks.mjs
+bookmarks-queue.json

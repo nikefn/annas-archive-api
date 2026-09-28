@@ -124,6 +124,25 @@ redeploy breaks any DHCP reservation. Pass the old MAC back in:
 
 ---
 
+## Queue books from browser bookmarks
+
+`scripts/queue-bookmarks.mjs` reads a browser bookmark export (`bookmarks.html`),
+collects Anna's Archive `/md5/` links from folders named `new_books` or
+`26_<n>_books` (subfolders included), and writes them to `bookmarks-queue.json`.
+Other links and duplicates are listed as skipped.
+
+```bash
+node scripts/queue-bookmarks.mjs ~/Desktop/bookmarks.html                 # scan + queue
+ANNAS_KEY=... node scripts/queue-bookmarks.mjs ~/Desktop/bookmarks.html \
+  --download ~/Books                                                      # then download
+```
+
+Downloads run one at a time, and a re-run resumes where the last one stopped.
+`--folders <regex>` changes which folders are scanned. The key is read only from
+`ANNAS_KEY` and is never written to the queue file.
+
+---
+
 ## API
 
 Two `GET` endpoints, both returning JSON. `dev.mjs` serves `public/` and mounts
