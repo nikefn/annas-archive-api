@@ -10,7 +10,7 @@
  *       resumes: items already marked "done" are skipped.
  *
  * Options:
- *   --folders <regex>  Folder names to scan (default: ^(new_books|26_\d+_books)$)
+ *   --folders <regex>  Only scan folders whose name matches (default: whole file)
  *   --queue <file>     Queue file (default: bookmarks-queue.json)
  *   --download <dir>   Download pending items into <dir>
  *   --tld <tld>        Mirror TLD, e.g. gd
@@ -30,7 +30,7 @@ import { collectQueue } from "../lib/bookmarks.js";
 const { values, positionals } = parseArgs({
   allowPositionals: true,
   options: {
-    folders: { type: "string", default: "^(new_books|26_\\d+_books)$" },
+    folders: { type: "string" },
     queue: { type: "string", default: "bookmarks-queue.json" },
     download: { type: "string" },
     tld: { type: "string" },
@@ -44,7 +44,10 @@ if (!bookmarksPath) {
 }
 
 const html = await readFile(bookmarksPath, "utf8");
-const { queue: found, skipped } = collectQueue(html, new RegExp(values.folders, "i"));
+const { queue: found, skipped } = collectQueue(
+  html,
+  values.folders ? new RegExp(values.folders, "i") : null
+);
 
 // Merge with an existing queue so finished downloads keep their status.
 let queue = [];
@@ -60,9 +63,13 @@ const byFolder = {};
 for (const item of found) byFolder[item.folder] = (byFolder[item.folder] || 0) + 1;
 console.log(`Found ${found.length} Anna's Archive links (${added.length} new):`);
 for (const [folder, n] of Object.entries(byFolder)) console.log(`  ${folder}: ${n}`);
-if (skipped.length) {
-  console.log(`\nSkipped ${skipped.length}:`);
-  for (const s of skipped) console.log(`  [${s.folder}] ${s.reason}: ${s.title || s.url}`);
+// Links to other sites are the bulk of a real export, so only count those.
+const otherSites = skipped.filter((s) => s.reason === "other site").length;
+const notable = skipped.filter((s) => s.reason !== "other site");
+if (otherSites) console.log(`\nIgnored ${otherSites} links to other sites.`);
+if (notable.length) {
+  console.log(`\nSkipped ${notable.length}:`);
+  for (const s of notable) console.log(`  [${s.folder}] ${s.reason}: ${s.title || s.url}`);
 }
 const pending = queue.filter((q) => q.status !== "done");
 console.log(`\nQueue: ${values.queue} — ${pending.length} pending, ${queue.length - pending.length} done`);

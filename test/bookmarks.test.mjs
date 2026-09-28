@@ -25,9 +25,9 @@ test("reports non-md5 links and duplicates as skipped", () => {
   assert.deepEqual(
     skipped.map((s) => [s.folder, s.reason]),
     [
-      ["new_books", "not an Anna's Archive /md5/ link"],
+      ["new_books", "other site"],
       ["26_1_books", "duplicate"],
-      ["26_1_books", "not an Anna's Archive /md5/ link"],
+      ["26_1_books", "Anna's Archive link without an md5"],
     ]
   );
 });
@@ -36,4 +36,18 @@ test("annasMd5 rejects look-alike hosts and malformed hashes", () => {
   assert.equal(annasMd5("https://annas-archive.evil.com/md5/0123456789abcdef0123456789abcdef"), null);
   assert.equal(annasMd5("https://annas-archive.gd/md5/xyz"), null);
   assert.equal(annasMd5("not a url"), null);
+});
+
+test("without a folder pattern the whole file is scanned", () => {
+  const { queue } = collectQueue(html);
+  assert.deepEqual(
+    queue.map((q) => [q.folder, q.md5]),
+    [
+      ["Bookmarks Bar", "00000000000000000000000000000000"],
+      ["Bookmarks Bar/new_books", "0123456789abcdef0123456789abcdef"],
+      ["Bookmarks Bar/new_books/sci-fi", "fedcba9876543210fedcba9876543210"],
+      ["Bookmarks Bar/26_5_books", "11111111111111111111111111111111"],
+      ["Bookmarks Bar/old_books", "22222222222222222222222222222222"],
+    ]
+  );
 });
