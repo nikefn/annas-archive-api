@@ -137,7 +137,15 @@ ANNAS_KEY=... node scripts/queue-bookmarks.mjs ~/Desktop/bookmarks.html \
   --download ~/Books                                                      # then download
 ```
 
-Downloads run one at a time, and a re-run resumes where the last one stopped.
+Downloads run one at a time. A re-run never downloads a finished book again, and
+a run stops as soon as the account has no fast downloads left, so just run the
+same command again once they reset. Each file is named after its bookmark title
+and gets its extension from its contents (PDF, EPUB, MOBI, DjVu, FB2, …), not
+from the download URL.
+
+`--fix <dir>` checks files that are already downloaded: it renames each one to
+the right extension, and moves anything that is really an error page into
+`<dir>/_invalid/` and re-queues it.
 `--folders <regex>` limits the scan to matching folders (subfolders included),
 e.g. `--folders '^(new_books|26_\d+_books)$'`. The key is read only from
 `ANNAS_KEY` and is never written to the queue file.

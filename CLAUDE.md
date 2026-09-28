@@ -21,6 +21,7 @@ public/index.html     Entire frontend (HTML + CSS + vanilla JS, no build)
 dev.mjs               Express server wiring (static + api/ routes)
 test/parse.test.mjs   Parser tests using saved fixture HTML
 lib/bookmarks.js      Bookmark-export parser (pure)
+lib/filetype.js       Magic-byte file type detection for downloads (pure)
 scripts/queue-bookmarks.mjs  CLI: bookmarks.html -> queue -> sequential downloads
 ```
 
