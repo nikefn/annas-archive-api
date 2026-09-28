@@ -138,17 +138,36 @@ ANNAS_KEY=... node scripts/queue-bookmarks.mjs ~/Desktop/bookmarks.html \
 ```
 
 Downloads run one at a time. A re-run never downloads a finished book again, and
-a run stops as soon as the account has no fast downloads left, so just run the
-same command again once they reset. Each file is named after its bookmark title
-and gets its extension from its contents (PDF, EPUB, MOBI, DjVu, FB2, …), not
-from the download URL.
+a run stops as soon as the account has no fast downloads left. Each file is
+named after its bookmark title and only saved after it passes the checks below.
 
-`--fix <dir>` checks files that are already downloaded: it renames each one to
-the right extension, and moves anything that is really an error page into
-`<dir>/_invalid/` and re-queues it.
-`--folders <regex>` limits the scan to matching folders (subfolders included),
-e.g. `--folders '^(new_books|26_\d+_books)$'`. The key is read only from
-`ANNAS_KEY` and is never written to the queue file.
+`--verify <dir>` checks everything already in the folder and fixes what it can:
+
+- **type and extension** from the file's bytes (PDF, EPUB, MOBI, DjVu, FB2, …)
+- **completeness**: PDFs must end in `%%EOF`, EPUB/ZIP need their end-of-directory
+  record, DjVu must match its declared length
+- **checksum**: an Anna's Archive md5 is the MD5 of the file, so every book must
+  hash to the md5 it was bookmarked under
+- **filename**: no characters that break macOS, Windows or e-readers
+
+Wrong names are renamed in place; error pages, truncated files and checksum
+mismatches go to `<dir>/_invalid/` and are re-queued (up to 3 attempts each).
+
+### Unattended batches
+
+Fast downloads return 18 hours after each one is used. `scripts/scheduler.mjs`
+stays running, downloads until the credits run out, verifies the folder after
+every batch, and schedules the next batch for when the credits come back:
+
+```bash
+ANNAS_KEY=... node scripts/scheduler.mjs ~/Desktop/bookmarks.html --dir ~/Books \
+  --at 06:00 --at 17:00
+```
+
+`--at` sets the first start times; after that each batch schedules follow-ups 18h
+after its first and last download. A batch that finds no credits retries every
+30 minutes. The schedule survives a restart (`scheduler-state.json`), progress is
+logged to `scheduler.log`, and on macOS it keeps the Mac awake with `caffeinate`.
 
 ---
 

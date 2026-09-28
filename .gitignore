@@ -22,3 +22,5 @@ Thumbs.db
 
 # Local download queue from scripts/queue-bookmarks.mjs
 bookmarks-queue.json
+scheduler-state.json
+scheduler.log
