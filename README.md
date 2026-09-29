@@ -188,7 +188,12 @@ ANNAS_KEY=... node scripts/scheduler.mjs ~/Desktop/bookmarks.html --dir ~/Books 
 
 `--at` sets the first start times; after that each batch schedules follow-ups 18h
 after its first and last download. A batch that finds no credits retries every
-30 minutes. The schedule survives a restart (`scheduler-state.json`), progress is
+30 minutes.
+
+For fixed slots instead, add `--every <hours>`: each `--at` time then repeats on
+its own, e.g. `--at 17:00 --at 00:00 --every 18` runs 17:00 → 11:00 → 05:00 → …
+and 00:00 → 18:00 → 12:00 → …, whether or not the previous batch found credits.
+A slot missed while the scheduler was stopped runs once when it restarts. The schedule survives a restart (`scheduler-state.json`), progress is
 logged to `scheduler.log`, and on macOS it keeps the Mac awake with `caffeinate`.
 
 ---

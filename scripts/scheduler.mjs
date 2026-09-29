@@ -4,18 +4,26 @@
  * downloads should be available and verifies the folder after every batch.
  *
  *   ANNAS_KEY=... node scripts/scheduler.mjs ~/Desktop/bookmarks.html --dir ~/Books \
- *     --at 06:00 --at 17:00
+ *     --at 17:00 --at 00:00 --every 18
  *
  * Fast downloads come back 18 hours after each one is used (a rolling window).
- * So besides the --at start times, every batch schedules a follow-up 18h after
- * its first download and another 18h after its last, which is when that
- * batch's credits return. If a batch finds no credits it retries every 30 min.
- * The schedule is kept in scheduler-state.json so a restart doesn't lose it.
+ * Two ways to follow that:
+ *
+ *  - Fixed slots (--every <hours>): each --at time starts a series that
+ *    repeats every <hours> — 17:00 → 11:00 → 05:00 → 23:00 → … — whether or
+ *    not the previous batch found credits. Only network trouble adds retries.
+ *  - Following the credits (no --every): --at times run once; after that every
+ *    batch schedules a follow-up 18h after its first download and another 18h
+ *    after its last. A batch that finds no credits retries every 30 min.
+ *
+ * The schedule is kept in scheduler-state.json so a restart doesn't lose it; a
+ * slot missed while the scheduler was stopped runs once on restart.
  *
  * Options:
  *   --dir <dir>         Download folder (required)
- *   --at <HH:MM>        Local start time; repeatable. Each is used once, at its
- *                       next occurrence; the 18h follow-ups take over from there.
+ *   --at <HH:MM>        Local start time; repeatable. The first run is its next
+ *                       occurrence.
+ *   --every <hours>     Repeat each --at slot every <hours> (e.g. 18).
  *   --now               Also run a batch right away.
  *   --window <hours>    Credit reset window (default 18)
  *   --folders <regex>   Only queue links from matching folders
@@ -52,6 +60,7 @@ const { values, positionals } = parseArgs({
     dir: { type: "string" },
     at: { type: "string", multiple: true, default: [] },
     now: { type: "boolean", default: false },
+    every: { type: "string" },
     window: { type: "string", default: "18" },
     folders: { type: "string" },
     queue: { type: "string", default: "bookmarks-queue.json" },
@@ -77,6 +86,11 @@ const WINDOW_MS = Number(values.window) * HOUR;
 const RETRY_MS = 30 * 60 * 1000;
 const MERGE_MS = 10 * 60 * 1000; // wake-ups this close together run as one
 const RESET_MARGIN_MS = 2 * 60 * 1000;
+const EVERY_MS = values.every ? Number(values.every) * HOUR : null;
+if (values.every && !(EVERY_MS >= HOUR)) {
+  console.error(`--every expects a number of hours (at least 1), got "${values.every}"`);
+  process.exit(1);
+}
 
 const stamp = (t = Date.now()) => new Date(t).toLocaleString("sv-SE").slice(0, 16);
 function log(line) {
@@ -105,18 +119,45 @@ let wakes = [];
 if (existsSync(values.state)) {
   wakes = JSON.parse(readFileSync(values.state, "utf8")).wakes || [];
 }
-function addWake(t, why) {
-  if (wakes.some((w) => Math.abs(w.at - t) < MERGE_MS)) return;
-  wakes.push({ at: t, why });
+const saveState = () => writeFileSync(values.state, JSON.stringify({ wakes }, null, 2) + "\n");
+
+/**
+ * A wake is { at, why } plus, for a fixed slot, { series, repeatMs }. Slots
+ * are never merged away; one-off wakes within MERGE_MS of another are.
+ */
+function addWake(t, why, slot = null) {
+  if (!slot && wakes.some((w) => Math.abs(w.at - t) < MERGE_MS)) return;
+  wakes.push({ at: t, why, ...slot });
   wakes.sort((a, b) => a.at - b.at);
-  writeFileSync(values.state, JSON.stringify({ wakes }, null, 2) + "\n");
+  saveState();
 }
 function takeWake() {
   const w = wakes.shift();
-  writeFileSync(values.state, JSON.stringify({ wakes }, null, 2) + "\n");
+  if (w.repeatMs) {
+    // Next slot in the series that is still ahead of us.
+    let next = w.at + w.repeatMs;
+    while (next <= Date.now()) next += w.repeatMs;
+    addWake(next, w.why, { series: w.series, repeatMs: w.repeatMs });
+  }
+  saveState();
   return w;
 }
-for (const hhmm of values.at) addWake(nextOccurrence(hhmm), `start time ${hhmm}`);
+
+if (EVERY_MS) {
+  // Fixed slots replace the credit-following schedule. Keep existing series
+  // (so a restart doesn't reset them); start the ones not running yet.
+  wakes = wakes.filter((w) => w.series && values.at.includes(w.series));
+  for (const w of wakes) w.repeatMs = EVERY_MS;
+  for (const hhmm of values.at) {
+    if (!wakes.some((w) => w.series === hhmm)) {
+      addWake(nextOccurrence(hhmm), `slot ${hhmm}, every ${values.every}h`, { series: hhmm, repeatMs: EVERY_MS });
+    }
+  }
+  saveState();
+} else {
+  wakes = wakes.filter((w) => !w.series);
+  for (const hhmm of values.at) addWake(nextOccurrence(hhmm), `start time ${hhmm}`);
+}
 if (values.now) addWake(Date.now(), "--now");
 
 /**
@@ -187,7 +228,16 @@ process.on("SIGINT", () => {
   process.exit(0);
 });
 
-log(`Scheduler started — folder ${values.dir}, ${values.window}h credit window.`);
+function logUpcoming() {
+  const upcoming = wakes.slice(0, 4).map((w) => `${stamp(w.at)} (${w.why})`);
+  if (upcoming.length) log(`Upcoming: ${upcoming.join(" · ")}`);
+}
+
+log(
+  `Scheduler started — folder ${values.dir}, ` +
+    (EVERY_MS ? `fixed slots ${values.at.join(" & ")} every ${values.every}h.` : `${values.window}h credit window.`)
+);
+logUpcoming();
 await rescan();
 await verify("Initial verification");
 
@@ -212,6 +262,14 @@ while (true) {
     continue;
   }
 
+  if (EVERY_MS) {
+    // Fixed slots: the next slot comes regardless; only retry network trouble.
+    if (r.stalled && (!wakes.length || wakes[0].at > Date.now() + RETRY_MS)) {
+      addWake(Date.now() + RETRY_MS, "retry after errors");
+    }
+    logUpcoming();
+    continue;
+  }
   if (r.firstAt) addWake(r.firstAt + WINDOW_MS + RESET_MARGIN_MS, `credits from ${stamp(r.firstAt)} return`);
   if (r.lastAt) addWake(r.lastAt + WINDOW_MS + RESET_MARGIN_MS, `credits from ${stamp(r.lastAt)} return`);
   if (r.stalled || (r.outOfQuota && !r.downloaded)) {
