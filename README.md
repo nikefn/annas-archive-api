@@ -153,6 +153,22 @@ named after its bookmark title and only saved after it passes the checks below.
 Wrong names are renamed in place; error pages, truncated files and checksum
 mismatches go to `<dir>/_invalid/` and are re-queued (up to 3 attempts each).
 
+### Moving finished books out
+
+Don't drag books out of the download folder by hand while the scheduler runs —
+verification would see a finished book go missing and queue it again. Instead:
+
+```bash
+node scripts/queue-bookmarks.mjs --verify ~/Books --move-done ~/Books-Done
+```
+
+This verifies the folder, then moves every green book (with its `.txt`) to the
+other folder and marks it *moved*: it is never downloaded again and no longer
+expected in `~/Books`. Books already dragged into `~/Books-Done` by hand are
+recognised by md5 and marked too, even if they had been re-queued. Stop the
+scheduler first, or let it do this after every green batch with
+`--move-to ~/Books-Done`.
+
 ### Metadata files
 
 Every book is named `Title - Author.ext` from its Anna's Archive metadata

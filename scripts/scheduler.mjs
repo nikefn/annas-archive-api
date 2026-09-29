@@ -33,6 +33,8 @@
  *   --folders <regex>   Only queue links from matching folders
  *   --queue <file>      Queue file (default: bookmarks-queue.json)
  *   --log <file>        Log file (default: scheduler.log)
+ *   --move-to <dir>     After each green verification, move finished books
+ *                       (with their .txt) here; they're never re-downloaded.
  *   --tld <tld>         Mirror TLD, e.g. gd
  *
  * Every book gets "<book name>.txt" with its Anna's Archive metadata; any
@@ -49,6 +51,7 @@ import { parseArgs } from "node:util";
 import { collectQueue } from "../lib/bookmarks.js";
 import {
   downloadBatch,
+  moveDone,
   fillMetadata,
   formatVerify,
   isDownloadable,
@@ -65,6 +68,7 @@ const { values, positionals } = parseArgs({
     at: { type: "string", multiple: true, default: [] },
     now: { type: "boolean", default: false },
     every: { type: "string" },
+    "move-to": { type: "string" },
     window: { type: "string", default: "18" },
     folders: { type: "string" },
     queue: { type: "string", default: "bookmarks-queue.json" },
@@ -221,7 +225,13 @@ async function runBatch(why) {
   );
   const meta = await fillMetadata({ queue, key, tld: values.tld, save, log: (l) => log(`  ${l}`) });
   if (meta.written || meta.failed) log(`Metadata catch-up: ${meta.written} written, ${meta.failed} failed.`);
-  await verify("Verification");
+  const checked = await verify("Verification");
+  if (values["move-to"] && checked.green) {
+    const m = await moveDone({ dir: values.dir, dest: values["move-to"], queue, save, log: () => {} });
+    log(`Moved ${m.moved} finished books to ${values["move-to"]}` + (m.recognised ? ` (+${m.recognised} found there)` : ""));
+  } else if (values["move-to"]) {
+    log(`Not moving anything to ${values["move-to"]}: verification isn't green.`);
+  }
   return { ...result, firstAt, lastAt };
 }
 

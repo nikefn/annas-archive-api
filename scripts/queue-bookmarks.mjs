@@ -20,6 +20,12 @@
  *       publisher, year, ISBN/DOI, description, …) for every downloaded book
  *       that lacks one. Costs no fast downloads. New downloads get it anyway.
  *
+ *   node scripts/queue-bookmarks.mjs --verify ~/Books --move-done ~/Library-Done
+ *       Verify, then move every green book (with its .txt) to the other folder
+ *       and mark it "moved" — it is never downloaded again. Books already
+ *       dragged there by hand are recognised by md5 and marked too.
+ *       Stop the scheduler first (or use its --move-to option instead).
+ *
  *   ANNAS_KEY=... node scripts/queue-bookmarks.mjs --probe <md5>
  *       Fetch and print one book's metadata — to check it works.
  *
@@ -39,6 +45,7 @@ import { fetchMetadata } from "../lib/annas.js";
 import { collectQueue } from "../lib/bookmarks.js";
 import {
   downloadBatch,
+  moveDone,
   fillMetadata,
   formatVerify,
   loadQueue,
@@ -57,6 +64,7 @@ const { values, positionals } = parseArgs({
     fix: { type: "string" },
     metadata: { type: "string" },
     probe: { type: "string" },
+    "move-done": { type: "string" },
     tld: { type: "string" },
   },
 });
@@ -132,7 +140,17 @@ if (values.metadata) {
   console.log(formatVerify(await verifyDir({ dir: values.metadata, queue, save })));
 }
 
-if (verifyTarget) {
+if (verifyTarget && values["move-done"]) {
+  const r = await moveDone({ dir: verifyTarget, dest: values["move-done"], queue, save });
+  console.log(formatVerify(r.verify));
+  console.log(
+    `\nMoved ${r.moved} verified books to ${values["move-done"]}` +
+      (r.recognised ? `; recognised ${r.recognised} already there` : "") +
+      (r.skipped ? `; left ${r.skipped} that changed since verification` : "") +
+      ". None of them will be downloaded again."
+  );
+  if (!r.verify.green) process.exitCode = 1;
+} else if (verifyTarget) {
   const result = await verifyDir({ dir: verifyTarget, queue, save });
   console.log(formatVerify(result));
   if (!result.green) process.exitCode = 1;
