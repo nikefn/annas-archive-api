@@ -155,19 +155,20 @@ mismatches go to `<dir>/_invalid/` and are re-queued (up to 3 attempts each).
 
 ### Moving finished books out
 
-Don't drag books out of the download folder by hand while the scheduler runs —
-verification would see a finished book go missing and queue it again. Instead:
+Move finished books anywhere you like — by hand, even while the scheduler runs.
+Every book is verified when it's downloaded, so a verified book that is no
+longer in the download folder is recorded as *moved out* and never downloaded
+again. Move a book together with its `.txt`. (Only a book that was never
+verified is re-queued when its file goes missing.)
+
+To move them in one go instead, to any folder or drive:
 
 ```bash
-node scripts/queue-bookmarks.mjs --verify ~/Books --move-done ~/Books-Done
+node scripts/queue-bookmarks.mjs --verify ~/Books --move-done /Volumes/MyDrive/Books
 ```
 
-This verifies the folder, then moves every green book (with its `.txt`) to the
-other folder and marks it *moved*: it is never downloaded again and no longer
-expected in `~/Books`. Books already dragged into `~/Books-Done` by hand are
-recognised by md5 and marked too, even if they had been re-queued. Stop the
-scheduler first, or let it do this after every green batch with
-`--move-to ~/Books-Done`.
+That verifies the folder first and moves only green books, each with its `.txt`.
+The scheduler can do the same after every green batch with `--move-to <dir>`.
 
 ### Metadata files
 
