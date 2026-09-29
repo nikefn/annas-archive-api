@@ -24,3 +24,10 @@ Thumbs.db
 bookmarks-queue.json
 scheduler-state.json
 scheduler.log
+bookmarks-queue.json.bak
+bookmarks-queue.json.tmp
+scheduler.pid
+scheduler.out
+# Personal settings and notes
+resume.local.env
+*.local.md

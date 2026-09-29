@@ -26,6 +26,10 @@
  *       dragged there by hand are recognised by md5 and marked too.
  *       Stop the scheduler first (or use its --move-to option instead).
  *
+ *   node scripts/queue-bookmarks.mjs --status
+ *       Progress report: books per status, metadata coverage, permanent
+ *       failures, whether the scheduler runs, the next slots, recent batches.
+ *
  *   ANNAS_KEY=... node scripts/queue-bookmarks.mjs --probe <md5>
  *       Fetch and print one book's metadata — to check it works.
  *
@@ -38,6 +42,7 @@
  * argument, and it is never written to the queue file or printed.
  */
 
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
@@ -48,7 +53,9 @@ import {
   moveDone,
   fillMetadata,
   formatVerify,
+  isDownloadable,
   loadQueue,
+  MAX_ATTEMPTS,
   mergeQueue,
   saveQueue,
   verifyDir,
@@ -65,6 +72,7 @@ const { values, positionals } = parseArgs({
     metadata: { type: "string" },
     probe: { type: "string" },
     "move-done": { type: "string" },
+    status: { type: "boolean", default: false },
     tld: { type: "string" },
   },
 });
@@ -86,6 +94,11 @@ if (values.probe) {
   const meta = await fetchMetadata(values.probe.trim().toLowerCase(), { key: needKey(), tld: values.tld });
   console.log(`(from ${meta.source})\n`);
   console.log(formatMetadataText(meta));
+  process.exit(0);
+}
+
+if (values.status) {
+  printStatus();
   process.exit(0);
 }
 
@@ -154,4 +167,48 @@ if (verifyTarget && values["move-done"]) {
   const result = await verifyDir({ dir: verifyTarget, queue, save });
   console.log(formatVerify(result));
   if (!result.green) process.exitCode = 1;
+}
+
+function printStatus() {
+  const by = (pred) => queue.filter(pred);
+  const done = by((q) => q.status === "done");
+  const moved = by((q) => q.status === "moved");
+  const toGo = by(isDownloadable);
+  const gaveUp = by((q) => q.status === "failed" && (q.attempts || 0) >= MAX_ATTEMPTS);
+  const finished = done.length + moved.length;
+  const withMeta = [...done, ...moved].filter((q) => q.metaFile && existsSync(q.metaFile)).length;
+  const pct = queue.length ? Math.round((finished / queue.length) * 100) : 0;
+
+  console.log(`Queue ${values.queue}: ${queue.length} books`);
+  console.log(`  finished      ${finished} (${pct}%) — ${done.length} in the download folder, ${moved.length} moved out`);
+  console.log(`  to download   ${toGo.length}`);
+  console.log(`  gave up       ${gaveUp.length}${gaveUp.length ? " (failed " + MAX_ATTEMPTS + "×, need a look)" : ""}`);
+  console.log(`  metadata      ${withMeta}/${finished} finished books have their .txt`);
+  for (const q of gaveUp.slice(0, 10)) console.log(`    ✗ ${q.md5} ${q.title || ""}: ${q.error}`);
+
+  let running = "not running";
+  if (existsSync("scheduler.pid")) {
+    const pid = Number(readFileSync("scheduler.pid", "utf8"));
+    try {
+      process.kill(pid, 0);
+      running = `running (pid ${pid})`;
+    } catch {
+      running = "not running (stale scheduler.pid from a crash — safe to ignore)";
+    }
+  }
+  console.log(`\nScheduler: ${running}`);
+  if (existsSync("scheduler-state.json")) {
+    const { wakes = [] } = JSON.parse(readFileSync("scheduler-state.json", "utf8"));
+    const fmt = (t) => new Date(t).toLocaleString("sv-SE").slice(0, 16);
+    for (const w of wakes.slice(0, 5)) {
+      console.log(`  ${w.at < Date.now() ? "missed" : "next  "} ${fmt(w.at)}  ${w.why}`);
+    }
+    if (wakes.some((w) => w.at < Date.now())) console.log("  (missed slots run once as soon as the scheduler starts)");
+  }
+  if (existsSync("scheduler.log")) {
+    const lines = readFileSync("scheduler.log", "utf8").trim().split("\n");
+    const recent = lines.filter((l) => /■ Batch done|Verification:|Stopped|crashed/.test(l)).slice(-6);
+    if (recent.length) console.log("\nRecent (scheduler.log):\n" + recent.map((l) => "  " + l).join("\n"));
+    console.log(`  last log line: ${lines.at(-1)}`);
+  }
 }

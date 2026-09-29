@@ -192,6 +192,12 @@ Verification renames books (and their `.txt`) to that scheme, so `--metadata`
 also tidies up books downloaded under older names, and reports coverage
 (`metadata 412/412`).
 
+### After a restart or crash
+
+`scripts/resume.sh status | check | start | stop` picks everything back up —
+see [docs/RESUME.md](docs/RESUME.md), including a prompt for a local Claude Code
+agent. `node scripts/queue-bookmarks.mjs --status` prints progress any time.
+
 ### Unattended batches
 
 Fast downloads return 18 hours after each one is used. `scripts/scheduler.mjs`

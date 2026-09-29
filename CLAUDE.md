@@ -26,6 +26,7 @@ lib/metadata.js       Record JSON/page -> metadata object -> .txt (pure)
 lib/downloader.js     Queue store, download batch, metadata sidecars, folder verification
 scripts/scheduler.mjs Long-running batch scheduler around the 18h credit window
 scripts/queue-bookmarks.mjs  CLI: bookmarks.html -> queue -> sequential downloads
+scripts/resume.sh     Resume after restart/crash: status | check | start | stop (see docs/RESUME.md)
 ```
 
 The handlers in `api/` must stay framework-agnostic (`req.query` in, `res.status().json()` out). All real logic belongs in `lib/annas.js`.
@@ -51,6 +52,11 @@ them — see `isChallenge()`.
 **Download key never touches disk.** The key is passed per-request via `Authorization: Bearer` and stored only in the browser's `localStorage`. The server must never log or persist it. The same key is the account secret key used to log in; the in-memory `sessions` cache in `lib/annas.js` stores only the *derived* session cookie, under a sha256 of the key — never the key itself.
 
 **Frontend has no build step.** `public/index.html` is a single file with inline CSS and JS. Do not introduce a bundler.
+
+**Local state stays local.** `bookmarks-queue.json(.bak)`, `scheduler-state.json`,
+`scheduler.log/.out/.pid`, `resume.local.env` and `*.local.md` hold personal paths
+and reading lists — they are git-ignored and must never be committed. Neither may
+the Anna's Archive key, anywhere.
 
 ## Environment variables
 

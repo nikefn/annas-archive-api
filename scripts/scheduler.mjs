@@ -44,7 +44,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
@@ -74,6 +74,7 @@ const { values, positionals } = parseArgs({
     queue: { type: "string", default: "bookmarks-queue.json" },
     log: { type: "string", default: "scheduler.log" },
     state: { type: "string", default: "scheduler-state.json" },
+    pid: { type: "string", default: "scheduler.pid" },
     tld: { type: "string" },
   },
 });
@@ -106,6 +107,30 @@ function log(line) {
   console.log(out);
   appendFileSync(values.log, out + "\n");
 }
+
+// One scheduler at a time: two would race on the queue file and the credits.
+if (existsSync(values.pid)) {
+  const other = Number(readFileSync(values.pid, "utf8"));
+  let alive = false;
+  try {
+    process.kill(other, 0);
+    alive = other !== process.pid;
+  } catch {
+    // stale pid file from a crash
+  }
+  if (alive) {
+    console.error(`A scheduler is already running (pid ${other}). Stop it first: kill ${other}`);
+    process.exit(1);
+  }
+}
+writeFileSync(values.pid, String(process.pid));
+process.on("exit", () => {
+  try {
+    if (readFileSync(values.pid, "utf8") === String(process.pid)) rmSync(values.pid);
+  } catch {
+    // already gone
+  }
+});
 
 if (process.platform === "darwin") {
   // -i: no idle sleep, -s: no system sleep on AC power, -w: until we exit.
@@ -239,10 +264,12 @@ async function runBatch(why) {
 
 // --- main loop ---------------------------------------------------------------
 
-process.on("SIGINT", () => {
-  log("Stopped by user. Run the same command to resume; the schedule is saved.");
-  process.exit(0);
-});
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    log(`Stopped (${signal}). Run the same command to resume; the schedule is saved.`);
+    process.exit(0);
+  });
+}
 
 function logUpcoming() {
   const upcoming = wakes.slice(0, 4).map((w) => `${stamp(w.at)} (${w.why})`);
