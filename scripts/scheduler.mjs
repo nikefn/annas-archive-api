@@ -16,6 +16,10 @@
  *    batch schedules a follow-up 18h after its first download and another 18h
  *    after its last. A batch that finds no credits retries every 30 min.
  *
+ * The quota itself is never configured: a batch simply runs until the account
+ * answers "No downloads left". Credits added later need only a new --at slot at
+ * the time they first become available.
+ *
  * The schedule is kept in scheduler-state.json so a restart doesn't lose it; a
  * slot missed while the scheduler was stopped runs once on restart.
  *

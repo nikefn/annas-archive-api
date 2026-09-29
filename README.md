@@ -193,7 +193,12 @@ after its first and last download. A batch that finds no credits retries every
 For fixed slots instead, add `--every <hours>`: each `--at` time then repeats on
 its own, e.g. `--at 17:00 --at 00:00 --every 18` runs 17:00 → 11:00 → 05:00 → …
 and 00:00 → 18:00 → 12:00 → …, whether or not the previous batch found credits.
-A slot missed while the scheduler was stopped runs once when it restarts. The schedule survives a restart (`scheduler-state.json`), progress is
+A slot missed while the scheduler was stopped runs once when it restarts.
+
+The quota is never configured: every batch downloads until Anna's Archive
+answers "No downloads left". When credits are added (a membership upgrade, say),
+give them their own slot at the time they first become available, e.g.
+`--at 17:00 --at 00:00 --at 07:15 --every 18`; existing slots keep their place. The schedule survives a restart (`scheduler-state.json`), progress is
 logged to `scheduler.log`, and on macOS it keeps the Mac awake with `caffeinate`.
 
 ---
