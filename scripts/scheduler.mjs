@@ -227,7 +227,9 @@ async function runBatch(why) {
   if (meta.written || meta.failed) log(`Metadata catch-up: ${meta.written} written, ${meta.failed} failed.`);
   const checked = await verify("Verification");
   if (values["move-to"] && checked.green) {
-    const m = await moveDone({ dir: values.dir, dest: values["move-to"], queue, save, log: () => {} });
+    // No md5 scan of the destination: its files may be renamed or reorganised
+    // freely, and hashing them all after every batch would be slow.
+    const m = await moveDone({ dir: values.dir, dest: values["move-to"], queue, save, log: () => {}, recognise: false });
     log(`Moved ${m.moved} finished books to ${values["move-to"]}` + (m.recognised ? ` (+${m.recognised} found there)` : ""));
   } else if (values["move-to"]) {
     log(`Not moving anything to ${values["move-to"]}: verification isn't green.`);
