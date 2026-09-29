@@ -155,10 +155,13 @@ mismatches go to `<dir>/_invalid/` and are re-queued (up to 3 attempts each).
 
 ### Metadata files
 
-Every downloaded book gets a `.txt` with the same name (`Book.pdf` → `Book.txt`)
-holding its Anna's Archive metadata: title, authors, publisher, edition, year,
-language, format, size, ISBN/DOI and other identifiers, the md5, the Anna's
-Archive link, the bookmark folder, and the description. It comes from the
+Every book is named `Title - Author.ext` from its Anna's Archive metadata
+(falling back to the bookmark title, then the md5), cut at word boundaries. It
+gets a `.txt` with the same name (`Book.pdf` → `Book.txt`) holding title,
+authors, publisher, edition, year, language, format, size, content type, the
+useful identifiers (ISBN, DOI, ISSN, ASIN, OCLC, Open Library, Goodreads, …),
+the md5, the Anna's Archive link, the bookmark folder, and the description.
+Anna's Archive's internal ids and paths are left out. It comes from the
 record's JSON (`/db/aarecord_elasticsearch/md5:<md5>.json`), falling back to the
 book page, both fetched with the signed-in session. It costs no fast downloads,
 and a failed lookup never costs a book — it is retried after the next batch.
@@ -168,8 +171,9 @@ ANNAS_KEY=... node scripts/queue-bookmarks.mjs --metadata ~/Books   # backfill e
 ANNAS_KEY=... node scripts/queue-bookmarks.mjs --probe <md5>        # print one book's metadata
 ```
 
-Verification keeps each `.txt` paired with its book through renames and
-reports coverage (`metadata 412/412`).
+Verification renames books (and their `.txt`) to that scheme, so `--metadata`
+also tidies up books downloaded under older names, and reports coverage
+(`metadata 412/412`).
 
 ### Unattended batches
 

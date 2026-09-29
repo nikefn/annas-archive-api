@@ -14,7 +14,15 @@ const record = {
       language_codes: ["en"],
       extension_best: "epub",
       filesize_best: 1572864,
-      identifiers_unified: { isbn13: ["9780804795098", "9780804795098"], doi: [] },
+      identifiers_unified: {
+        isbn13: ["9780804795098", "9780804795098"],
+        doi: [],
+        aacid: ["aacid__worldcat__x"],
+        server_path: ["g4/libgenrs/x"],
+        md5: ["a".repeat(32)],
+      },
+      content_type_best: "book_nonfiction",
+      original_filename_best: "upload/some/deep/path/978-0-8047-9509-8.epub",
       stripped_description_best: "  An essay on   exhaustion. ",
     },
   },
@@ -26,7 +34,9 @@ test("parseRecordJson reads the unified 'best' fields", () => {
   assert.equal(m.authors, "Byung-Chul Han");
   assert.equal(m.format, "EPUB");
   assert.equal(m.size, "1.5 MB");
-  assert.deepEqual(m.identifiers, { isbn13: ["9780804795098"] });
+  assert.deepEqual(m.identifiers, { isbn13: ["9780804795098"] }); // internals dropped
+  assert.equal(m.content_type, "Book (non-fiction)");
+  assert.equal(m.original_filename, "978-0-8047-9509-8.epub");
   assert.equal(m.description, "An essay on exhaustion.");
 });
 
@@ -53,8 +63,10 @@ test("formatMetadataText aligns fields and skips empty ones", () => {
     { folder: "26_1_books", file: "The Burnout Society.epub" }
   );
   assert.match(text, /^Title: +The Burnout Society$/m);
-  assert.match(text, /^ISBN13: +9780804795098$/m);
+  assert.match(text, /^ISBN-13: +9780804795098$/m);
   assert.match(text, /^Bookmark folder: +26_1_books$/m);
-  assert.doesNotMatch(text, /^Content type:/m);
+  assert.match(text, /^Content type: +Book \(non-fiction\)$/m);
+  assert.doesNotMatch(text, /AACID|SERVER PATH|^DOI:/m); // internals and empty fields left out
+  assert.equal(text.match(/^MD5:/gm).length, 1);
   assert.match(text, /\nDescription\n-----------\nAn essay on exhaustion\.\n$/);
 });

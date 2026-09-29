@@ -124,7 +124,8 @@ if (values.download) {
 }
 
 if (values.metadata) {
-  // Verify first so renamed books get their .txt under the final name.
+  // Verify first so every book is tracked; fetched metadata then gives books
+  // their "Title - Author" names, applied (with their .txt) by the last verify.
   await verifyDir({ dir: values.metadata, queue, save, log: () => {} });
   const m = await fillMetadata({ queue, key: needKey(), tld: values.tld, save });
   console.log(`\nMetadata: ${m.written} written, ${m.failed} failed.`);
