@@ -153,6 +153,24 @@ named after its bookmark title and only saved after it passes the checks below.
 Wrong names are renamed in place; error pages, truncated files and checksum
 mismatches go to `<dir>/_invalid/` and are re-queued (up to 3 attempts each).
 
+### Metadata files
+
+Every downloaded book gets a `.txt` with the same name (`Book.pdf` → `Book.txt`)
+holding its Anna's Archive metadata: title, authors, publisher, edition, year,
+language, format, size, ISBN/DOI and other identifiers, the md5, the Anna's
+Archive link, the bookmark folder, and the description. It comes from the
+record's JSON (`/db/aarecord_elasticsearch/md5:<md5>.json`), falling back to the
+book page, both fetched with the signed-in session. It costs no fast downloads,
+and a failed lookup never costs a book — it is retried after the next batch.
+
+```bash
+ANNAS_KEY=... node scripts/queue-bookmarks.mjs --metadata ~/Books   # backfill existing books
+ANNAS_KEY=... node scripts/queue-bookmarks.mjs --probe <md5>        # print one book's metadata
+```
+
+Verification keeps each `.txt` paired with its book through renames and
+reports coverage (`metadata 412/412`).
+
 ### Unattended batches
 
 Fast downloads return 18 hours after each one is used. `scripts/scheduler.mjs`

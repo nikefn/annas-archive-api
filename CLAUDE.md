@@ -22,7 +22,8 @@ dev.mjs               Express server wiring (static + api/ routes)
 test/parse.test.mjs   Parser tests using saved fixture HTML
 lib/bookmarks.js      Bookmark-export parser (pure)
 lib/filetype.js       Magic-byte type, integrity and filename checks (pure)
-lib/downloader.js     Queue store, download batch, folder verification
+lib/metadata.js       Record JSON/page -> metadata object -> .txt (pure)
+lib/downloader.js     Queue store, download batch, metadata sidecars, folder verification
 scripts/scheduler.mjs Long-running batch scheduler around the 18h credit window
 scripts/queue-bookmarks.mjs  CLI: bookmarks.html -> queue -> sequential downloads
 ```

@@ -23,6 +23,9 @@
  *   --log <file>        Log file (default: scheduler.log)
  *   --tld <tld>         Mirror TLD, e.g. gd
  *
+ * Every book gets "<book name>.txt" with its Anna's Archive metadata; any
+ * that are missing (e.g. a lookup failed) are filled in after each batch.
+ *
  * On macOS it runs `caffeinate` for its own lifetime so the Mac doesn't sleep.
  */
 
@@ -34,6 +37,7 @@ import { parseArgs } from "node:util";
 import { collectQueue } from "../lib/bookmarks.js";
 import {
   downloadBatch,
+  fillMetadata,
   formatVerify,
   isDownloadable,
   loadQueue,
@@ -170,6 +174,8 @@ async function runBatch(why) {
     `■ Batch done in ${mins} min: ${result.downloaded} downloaded, ${result.failed} failed, ` +
       `${result.remaining} left` + (result.outOfQuota ? " (out of fast downloads)" : "")
   );
+  const meta = await fillMetadata({ queue, key, tld: values.tld, save, log: (l) => log(`  ${l}`) });
+  if (meta.written || meta.failed) log(`Metadata catch-up: ${meta.written} written, ${meta.failed} failed.`);
   await verify("Verification");
   return { ...result, firstAt, lastAt };
 }

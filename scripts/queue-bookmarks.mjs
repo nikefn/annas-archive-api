@@ -15,6 +15,14 @@
  *       names in place; broken files go to <dir>/_invalid/ and are re-queued.
  *       (--fix is an alias.)
  *
+ *   ANNAS_KEY=... node scripts/queue-bookmarks.mjs --metadata ~/Books
+ *       Write "<book name>.txt" with Anna's Archive metadata (title, authors,
+ *       publisher, year, ISBN/DOI, description, …) for every downloaded book
+ *       that lacks one. Costs no fast downloads. New downloads get it anyway.
+ *
+ *   ANNAS_KEY=... node scripts/queue-bookmarks.mjs --probe <md5>
+ *       Fetch and print one book's metadata — to check it works.
+ *
  * Options:
  *   --folders <regex>  Only scan folders whose name matches (default: whole file)
  *   --queue <file>     Queue file (default: bookmarks-queue.json)
@@ -27,9 +35,11 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
+import { fetchMetadata } from "../lib/annas.js";
 import { collectQueue } from "../lib/bookmarks.js";
 import {
   downloadBatch,
+  fillMetadata,
   formatVerify,
   loadQueue,
   mergeQueue,
@@ -45,6 +55,8 @@ const { values, positionals } = parseArgs({
     download: { type: "string" },
     verify: { type: "string" },
     fix: { type: "string" },
+    metadata: { type: "string" },
+    probe: { type: "string" },
     tld: { type: "string" },
   },
 });
@@ -54,7 +66,22 @@ const save = () => saveQueue(values.queue, queue);
 const verifyTarget = values.verify || values.fix;
 const bookmarksPath = positionals[0];
 
-if (!bookmarksPath && !verifyTarget) {
+const key = process.env.ANNAS_KEY;
+const needKey = () => {
+  if (key) return key;
+  console.error("Set ANNAS_KEY to your Anna's Archive account secret key.");
+  process.exit(1);
+};
+
+if (values.probe) {
+  const { formatMetadataText } = await import("../lib/metadata.js");
+  const meta = await fetchMetadata(values.probe.trim().toLowerCase(), { key: needKey(), tld: values.tld });
+  console.log(`(from ${meta.source})\n`);
+  console.log(formatMetadataText(meta));
+  process.exit(0);
+}
+
+if (!bookmarksPath && !verifyTarget && !values.metadata) {
   console.error(
     "Usage: node scripts/queue-bookmarks.mjs <bookmarks.html> [--download <dir>]\n" +
       "       node scripts/queue-bookmarks.mjs --verify <dir>"
@@ -89,16 +116,19 @@ if (bookmarksPath) {
 }
 
 if (values.download) {
-  const key = process.env.ANNAS_KEY;
-  if (!key) {
-    console.error("Set ANNAS_KEY to your Anna's Archive account secret key to download.");
-    process.exit(1);
-  }
-  const r = await downloadBatch({ queue, dir: values.download, key, tld: values.tld, save });
+  const r = await downloadBatch({ queue, dir: values.download, key: needKey(), tld: values.tld, save });
   console.log(`\n${r.downloaded} downloaded, ${r.failed} failed, ${r.remaining} still to download.`);
   if (r.outOfQuota) console.log("Out of fast downloads — run again once they reset.");
   console.log("\nVerifying…");
   console.log(formatVerify(await verifyDir({ dir: values.download, queue, save })));
+}
+
+if (values.metadata) {
+  // Verify first so renamed books get their .txt under the final name.
+  await verifyDir({ dir: values.metadata, queue, save, log: () => {} });
+  const m = await fillMetadata({ queue, key: needKey(), tld: values.tld, save });
+  console.log(`\nMetadata: ${m.written} written, ${m.failed} failed.`);
+  console.log(formatVerify(await verifyDir({ dir: values.metadata, queue, save })));
 }
 
 if (verifyTarget) {
