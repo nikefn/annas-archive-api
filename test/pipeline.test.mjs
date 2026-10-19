@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { after, before, test } from "node:test";
 
 import { HttpError } from "../src/http.js";
-import { gather, isDue, matches, mergeMeta, newPass, processWork } from "../src/pipeline.js";
+import { config } from "../src/config.js";
+import { gather, isDue, matches, mergeMeta, newRunState, processWork, run } from "../src/pipeline.js";
 import * as store from "../src/store.js";
 import { makePdf, prose } from "./helpers.mjs";
 
@@ -96,18 +97,37 @@ test("a work no source has is not_found, tried again after a day", async () => {
   assert.match(done.error, /no acceptable file/);
 });
 
-test("an outage is not a try and is retried within hours", async () => {
+test("an outage is not a try; repeated outages wait longer", async () => {
   const { work } = await store.add("10.5555/outage");
   const down = { id: "down", name: "down", missing: () => [], find: async () => { throw new HttpError("HTTP 503", 503); } };
-  const done = await processWork(work, [down]);
-  assert.equal(done.status, "waiting");
-  assert.equal(done.tries, 0);
-  assert.ok(Date.parse(done.nextTry) <= Date.now() + 6 * 3_600_000);
-  assert.ok(!isDue(done));
-  assert.ok(isDue(done, Date.parse(done.nextTry)));
+  const once = await processWork(work, [down]);
+  assert.equal(once.status, "waiting");
+  assert.equal(once.tries, 0);
+  assert.ok(Date.parse(once.nextTry) <= Date.now() + 6 * 3_600_000);
+  assert.ok(!isDue(once));
+  assert.ok(isDue(once, Date.parse(once.nextTry)));
+  const twice = await processWork(once, [down]);
+  assert.ok(Date.parse(twice.nextTry) > Date.now() + 11 * 3_600_000);
 });
 
-test("a bot check pauses the source for the rest of the pass", async () => {
+test("a dead file URL is a failed attempt, not an outage", async () => {
+  const { work } = await store.add("10.5555/dead-url");
+  const source = fakeSource("one", withDoi("10.5555/dead-url"), [{ url: "http://bad host/x.pdf" }, { url: "ftp://example.org/x.pdf" }]);
+  const done = await processWork(work, [source]);
+  assert.equal(done.status, "not_found");
+  assert.deepEqual(done.attempts.map((a) => a.reason), [done.attempts[0].reason, "not an http(s) link"]);
+});
+
+test("a warning about the work does not cost extra downloads", async () => {
+  const { work } = await store.add("10.5555/no-year");
+  const meta = { title: TITLE, authors: ["Lima, Ana"], doi: "10.5555/no-year" }; // no year: metadata-complete warns
+  const done = await processWork(work, [fakeSource("one", meta, ["/right.pdf", "/right.pdf?copy=2"])]);
+  assert.equal(done.attempts.length, 1);
+  assert.equal(done.status, "review");
+  assert.ok(done.checks.some((c) => c.name === "metadata-complete" && c.status === "warn"));
+});
+
+test("a bot check pauses the source for the rest of the run", async () => {
   let calls = 0;
   const walled = {
     id: "walled",
@@ -118,10 +138,10 @@ test("a bot check pauses the source for the rest of the pass", async () => {
       throw new HttpError("bot check", 403, "CHALLENGE");
     },
   };
-  const pass = newPass();
+  const shared = newRunState();
   for (const doi of ["10.5555/w1", "10.5555/w2"]) {
     const { work } = await store.add(doi);
-    assert.equal((await processWork(work, [walled], { pass })).status, "waiting");
+    assert.equal((await processWork(work, [walled], { shared })).status, "waiting");
   }
   assert.equal(calls, 1);
 });
@@ -162,6 +182,13 @@ test("for a book, excerpts come last and journal-article files get no credited l
   assert.deepEqual(seen, [["c", true], ["d", true], ["b", true], ["a", false]]);
 });
 
+test("an ISBN-only work matches title search results once a source names the ISBN", async () => {
+  const catalogue = { id: "catalogue", find: async (q) => (q.isbn ? [{ meta: { title: TITLE, isbn: ["9780306406157"] }, files: [] }] : []) };
+  const shelf = { id: "shelf", find: async (q) => (q.isbn || q.title ? [{ meta: { title: TITLE }, files: [{ md5: "a".repeat(32) }] }] : []) };
+  const candidates = await gather({ isbn: "9780306406157" }, [catalogue, shelf]);
+  assert.deepEqual(candidates.map((c) => c.source), ["catalogue", "shelf"]);
+});
+
 test("a DOI-only work is searched again by the title another source found", async () => {
   const seen = [];
   const byDoi = { id: "meta", find: async (q) => (q.doi ? [{ meta: META, files: [] }] : []) };
@@ -175,6 +202,19 @@ test("a DOI-only work is searched again by the title another source found", asyn
   const candidates = await gather({ doi: META.doi }, [byDoi, byTitle]);
   assert.deepEqual(candidates.map((c) => c.source), ["meta", "titles"]);
   assert.equal(seen.at(-1).title, TITLE);
+});
+
+test("one failing work does not stop the run", async () => {
+  const saved = config.sources;
+  config.sources = [];
+  const { work: broken } = await store.add("10.5555/broken");
+  await store.save({ ...broken, attempts: null });
+  const { work: fine } = await store.add("10.5555/fine");
+  const done = await run({ ids: [broken.id, fine.id] });
+  config.sources = saved;
+  assert.equal(done.length, 2);
+  assert.match((await store.load(broken.id)).error, /^run failed/);
+  assert.equal((await store.load(fine.id)).status, "not_found");
 });
 
 test("candidates match on identifiers or title, and other volumes never match", () => {

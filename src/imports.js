@@ -9,18 +9,15 @@
 import { extname } from "node:path";
 
 import { parseInput } from "./ids.js";
+import { languageCode } from "./text.js";
 
-const LANGUAGES = {
-  english: "en", german: "de", ngerman: "de", deutsch: "de", french: "fr", francais: "fr",
-  spanish: "es", italian: "it", portuguese: "pt", dutch: "nl",
+/** BibTeX entry types -> the type hint rank.js understands; others give no hint. */
+const BIBTEX_TYPES = {
+  book: "book", mvbook: "book", booklet: "book",
+  inbook: "chapter", incollection: "chapter", inproceedings: "chapter", conference: "chapter",
+  article: "article", report: "report", techreport: "report", thesis: "thesis", phdthesis: "thesis",
+  mastersthesis: "thesis",
 };
-
-/** ISO 639-1 code from a code or an English/BibTeX language name, else undefined. */
-export function languageCode(value) {
-  const v = String(value ?? "").trim().toLowerCase();
-  if (/^[a-z]{2}$/.test(v)) return v;
-  return LANGUAGES[v];
-}
 
 function entry({ doi, isbn, url, title, authors, year, type, language, gold }) {
   const validIsbn = [].concat(isbn ?? []).find((i) => parseInput(`isbn:${i}`).isbn);
@@ -78,7 +75,7 @@ export function parseBibtex(text) {
         title: fields.title,
         authors: fields.author?.split(/\s+and\s+/i),
         year: fields.year ?? fields.date?.slice(0, 4),
-        type: m[1].toLowerCase(),
+        type: BIBTEX_TYPES[m[1].toLowerCase()],
         language: fields.language ?? fields.langid,
       })
     );
@@ -117,14 +114,14 @@ export function parseRis(text) {
 
 /** TSV with a header row naming the columns input, kind, language, gold. */
 export function parseTsv(text) {
-  const [header, ...rows] = text.split(/\r?\n/).filter((l) => l.trim() && !l.startsWith("#"));
+  const [header = "", ...rows] = text.split(/\r?\n/).filter((l) => l.trim() && !l.startsWith("#"));
   const cols = header.split("\t").map((c) => c.trim());
   return rows.map((row) => {
     const cells = Object.fromEntries(row.split("\t").map((c, i) => [cols[i], c.trim()]));
     const hints = { type: cells.kind || undefined, language: languageCode(cells.language), gold: cells.gold || undefined };
     for (const k of Object.keys(hints)) if (!hints[k]) delete hints[k];
     return { input: cells.input, hints };
-  });
+  }).filter((item) => item.input);
 }
 
 const parseLines = (text) =>

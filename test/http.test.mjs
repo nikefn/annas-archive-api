@@ -3,7 +3,7 @@ import "./env.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { HttpError, challengeOf, createPacer, isOutage, mirrorSet } from "../src/http.js";
+import { HttpError, challengeOf, createPacer, isOutage, mirrorSet, request } from "../src/http.js";
 
 test("requests to one host are spaced by its pace, other hosts are not held up", async () => {
   const pace = createPacer({ paceOf: (h) => (h === "slow.example" ? 2000 : 0), now: () => 0, wait: async () => {} });
@@ -23,9 +23,9 @@ test("bot checks are recognised, ordinary refusals are not", () => {
 });
 
 test("outages are temporary failures", () => {
-  for (const err of [new HttpError("x", 503), new HttpError("x", 429), new HttpError("x", 0), new HttpError("x", 403, "CHALLENGE")]) {
-    assert.ok(isOutage(err), err.status);
-  }
+  const temporary = [new HttpError("x", 503), new HttpError("x", 429), new HttpError("x", 0, "NETWORK"), new HttpError("x", 403, "CHALLENGE")];
+  for (const err of temporary) assert.ok(isOutage(err), err.message);
+  assert.ok(!isOutage(new HttpError("x", 0, "UNREACHABLE")));
   assert.ok(!isOutage(new HttpError("x", 404)));
   assert.ok(!isOutage(new Error("parse error")));
 });
@@ -41,4 +41,10 @@ test("mirrors: the one that worked last goes first; only outages move on", async
   assert.equal(result, "b");
   assert.deepEqual(m.ordered(), ["b", "a", "c"]);
   await assert.rejects(m.run(async () => { throw new HttpError("gone", 404); }), { status: 404 });
+});
+
+test("a URL that can never work fails at once, not as an outage", async () => {
+  const started = Date.now();
+  await assert.rejects(request("http://bad host/x.pdf"), (err) => err.code === "UNREACHABLE" && !isOutage(err));
+  assert.ok(Date.now() - started < 1000, "no retries");
 });

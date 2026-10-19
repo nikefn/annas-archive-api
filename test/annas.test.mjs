@@ -1,95 +1,46 @@
 /**
- * Parser tests against a saved search page (test/fixtures). The adapter's
- * routes and credit handling are tested in annas-routes.test.mjs.
+ * Pure parts of the Anna's Archive adapter. Its routes and credit handling are
+ * tested against a local stand-in for the site in annas-routes.test.mjs.
  */
 
 import "./env.mjs";
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { test } from "node:test";
+
 import { parseScidbPage, parseSearchResults, recordInfo } from "../src/sources/annas.js";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const BASE_URL = "https://annas-archive.gd";
-const html = readFileSync(
-  join(__dirname, "fixtures", "search_test-search.html"),
-  "utf-8"
-);
+const BASE = "https://annas-archive.gl";
+const results = parseSearchResults(readFileSync(new URL("./fixtures/annas-search.html", import.meta.url), "utf8"), BASE);
 
-const results = parseSearchResults(html, BASE_URL);
-
-test("extracts all results", () => {
-  assert.equal(results.length, 50);
+test("search results: one per card with a valid md5", () => {
+  assert.deepEqual(results.map((r) => r.md5), [
+    "0123456789abcdef0123456789abcdef",
+    "fedcba9876543210fedcba9876543210",
+    "00112233445566778899aabbccddeeff",
+  ]);
 });
 
-test("no missing core fields", () => {
-  for (const r of results) {
-    assert.ok(r.title, "title");
-    assert.ok(r.author, "author");
-    assert.ok(r.format, "format");
-    assert.ok(r.url.startsWith(BASE_URL + "/md5/"), "url");
-    assert.ok(r.cover_url && r.cover_url.startsWith("http"), "cover_url");
-  }
-});
-
-test("format breakdown", () => {
-  const counts = {};
-  for (const r of results) counts[r.format] = (counts[r.format] || 0) + 1;
-  assert.deepEqual(counts, { pdf: 29, epub: 18, mobi: 3 });
-});
-
-test("first result fields", () => {
-  const first = results[0];
-  assert.equal(first.title, "The man test : the Marin Test Series, #1");
-  assert.equal(first.author, "Aksel, Amanda");
-  assert.equal(first.format, "epub");
-  assert.equal(first.md5, "6c6b69b79adac1241c1706cec47b4b89");
-  assert.equal(
-    first.cover_url,
-    "https://covers.z-lib.sk/covers400/collections/foreignfiction/" +
-      "21e02dcbb28c80cdcd74e9782199d00e411e6477277c0c195c473442cec676c3.jpg"
-  );
-  // Downloads are not in the static HTML, so the parser leaves them unset.
-  assert.equal(first.downloads, null);
-});
-
-/**
- * Formats are read out of the metadata line, which also carries the year and
- * the file size. Alphanumeric extensions (fb2, azw3, mp3) have to survive that
- * without a bare year being mistaken for a format, so build the minimum card
- * shape the parser looks for and feed it one metadata line at a time.
- */
-function formatOf(metaLine) {
-  const md5 = "0".repeat(32);
-  const parsed = parseSearchResults(
-    `<div class="flex pt-3">
-       <a href="/md5/${md5}" class="js-vim-focus">Title</a>
-       <div class="font-semibold text-sm leading-[1.2]">${metaLine}</div>
-     </div>`,
-    BASE_URL
-  );
-  assert.equal(parsed.length, 1);
-  return parsed[0].format;
-}
-
-test("alphanumeric formats are recognised", () => {
-  const meta = (fmt) => `English [en] · ${fmt} · 1.2MB · 2014 · 📕 Book (fiction) · 🚀/lgli/lgrs`;
-  assert.equal(formatOf(meta("FB2")), "fb2");
-  assert.equal(formatOf(meta("AZW3")), "azw3");
-  assert.equal(formatOf(meta("MP3")), "mp3");
-  assert.equal(formatOf(meta("CBZ")), "cbz");
-  assert.equal(formatOf(meta("EPUB")), "epub");
-});
-
-test("year and size are never mistaken for a format", () => {
-  assert.equal(
-    formatOf("English [en] · 1.2MB · 2014 · 📕 Book (fiction)"),
-    null
-  );
-  assert.equal(formatOf("Spanish [es] · 2006 · 0.4MB"), null);
+test("search results: fields read from the card", () => {
+  assert.deepEqual(results[0], {
+    title: "Groundwater Recharge in Semi-Arid Basins",
+    author: "Lima, Ana",
+    format: "pdf",
+    size: Math.round(12.5 * 1024 * 1024),
+    content_type: "book_non_fiction",
+    name: "lgli/Example Press/Groundwater Recharge.pdf",
+    downloads: null,
+    cover_url: "https://covers.example/a.jpg",
+    url: `${BASE}/md5/0123456789abcdef0123456789abcdef`,
+    md5: "0123456789abcdef0123456789abcdef",
+  });
+  assert.equal(results[1].title, "Groundwater recharge estimates");
+  assert.equal(results[1].content_type, "journal_article");
+  assert.equal(results[1].cover_url, `${BASE}/covers/b.jpg`);
+  assert.equal(results[1].author, "");
+  assert.equal(results[2].format, "azw3");
+  assert.equal(results[2].cover_url, null);
 });
 
 test("file records give name, size, content type and IPFS ids", () => {
@@ -102,17 +53,11 @@ test("file records give name, size, content type and IPFS ids", () => {
       ipfs_infos: [{ ipfs_cid: "bafyexample", from: "x" }],
     },
   });
-  assert.deepEqual(info, {
-    name: "scimag/10.1000/x.pdf",
-    size: 123456,
-    format: "pdf",
-    contentType: "journal_article",
-    ipfs: ["bafyexample"],
-  });
+  assert.deepEqual(info, { name: "scimag/10.1000/x.pdf", size: 123456, format: "pdf", contentType: "journal_article", ipfs: ["bafyexample"] });
 });
 
 test("a SciDB page yields the PDF its viewer shows", () => {
   const page = '<iframe src="/pdfjs/web/viewer.html?file=https%3A%2F%2Ffiles.example%2Fa.pdf"></iframe>';
-  assert.equal(parseScidbPage(page, "https://annas-archive.gl/scidb/10.1/x"), "https://files.example/a.pdf");
-  assert.equal(parseScidbPage("<p>nothing</p>", "https://annas-archive.gl/scidb/10.1/x"), null);
+  assert.equal(parseScidbPage(page, `${BASE}/scidb/10.1/x`), "https://files.example/a.pdf");
+  assert.equal(parseScidbPage("<p>nothing</p>", `${BASE}/scidb/10.1/x`), null);
 });

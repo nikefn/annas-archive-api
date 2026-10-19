@@ -28,7 +28,7 @@ export function toRis(works) {
     for (const a of m.authors ?? []) field("AU", a);
     field("PY", m.year);
     field("DO", m.doi);
-    for (const isbn of m.isbn ?? []) field("SN", isbn);
+    for (const isbn of [].concat(m.isbn ?? [])) field("SN", isbn);
     field("T2", m.venue);
     field("PB", m.publisher);
     field("LA", m.language);

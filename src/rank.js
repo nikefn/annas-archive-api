@@ -3,7 +3,7 @@
  *
  * Order: free files before files that cost a download credit, then by how well
  * the candidate's title matched (same, other edition, contained in), then by
- * source priority. Files already rejected for this work are left out.
+ * source priority.
  */
 
 const KINDS = [
@@ -26,8 +26,9 @@ export function workKind(query, meta = {}) {
 
 const TIER = { same: 0, "other-edition": 1, "contained-in": 2 };
 
-export function rankFiles(candidates, rejectedMd5s = []) {
-  const seen = new Set(rejectedMd5s);
+/** Candidate files in the order they are tried, leaving out the md5s in `skip`. */
+export function rankFiles(candidates, skip = []) {
+  const seen = new Set(skip);
   const files = [];
   for (const c of candidates) {
     for (const f of c.files ?? []) {

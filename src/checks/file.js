@@ -1,6 +1,6 @@
 /**
- * File-level facts: what format a file really is (by its bytes, never by its
- * name or Content-Type), whether it opens, and its text for the content checks.
+ * File-level facts: a file's format (from its bytes, never from its name or
+ * Content-Type), whether it opens, and its text for the content checks.
  */
 
 import { readFile } from "node:fs/promises";
@@ -53,8 +53,8 @@ async function readPdf(buf) {
   }
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const task = getDocument({ data: new Uint8Array(buf), verbosity: 0 });
-  const pdf = await task.promise;
   try {
+    const pdf = await task.promise;
     const pageTexts = [];
     for (let i = 1; i <= Math.min(pdf.numPages, PAGES_READ); i++) {
       const content = await (await pdf.getPage(i)).getTextContent();

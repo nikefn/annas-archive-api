@@ -6,6 +6,8 @@
 
 import { createHash } from "node:crypto";
 
+import { asciiFold } from "./text.js";
+
 const PATTERNS = [
   ["doi", /^(?:doi:\s*|https?:\/\/(?:dx\.)?doi\.org\/)?(10\.\d{4,9}\/\S+)$/i],
   ["arxiv", /^(?:arxiv:\s*|https?:\/\/arxiv\.org\/(?:abs|pdf)\/)?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?\/\d{7}(?:v\d+)?)$/i],
@@ -66,12 +68,12 @@ export function workId(query) {
 
 /** Lowercase ASCII slug, safe as a file or folder name on every OS. */
 export function slug(text, max = 60) {
-  return String(text)
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9.]+/g, "-")
-    .replace(/^[-.]+|[-.]+$/g, "")
-    .slice(0, max)
-    .replace(/[-.]+$/, "") || "untitled";
+  return (
+    asciiFold(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9.]+/g, "-")
+      .replace(/^[-.]+|[-.]+$/g, "")
+      .slice(0, max)
+      .replace(/[-.]+$/, "") || "untitled"
+  );
 }

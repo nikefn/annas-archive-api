@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * litfetch command line. Every command reads and writes the library through
- * store.js; `run` and `find` are the only ones that use the network.
+ * store.js. `run` and `find` use the network; `recheck` does too when model
+ * triage is on. Commands that change existing works hold the library lock.
  */
 
 import { readFile } from "node:fs/promises";
@@ -11,6 +12,7 @@ import { parseArgs } from "node:util";
 import { stats, verify } from "./audit.js";
 import { checkFile } from "./checks/index.js";
 import { llmEnabled } from "./checks/llm.js";
+import { verdictOf, workChecks } from "./checks/rules.js";
 import { config } from "./config.js";
 import { toRis } from "./export.js";
 import { parseInput } from "./ids.js";
@@ -21,9 +23,9 @@ import * as store from "./store.js";
 
 const HELP = `litfetch: queue, fetch and verify literature
 
-  add <input...> [-f file]     queue works: DOI, arXiv id, ISBN, PMID/PMCID, md5,
-                               "celex: ...", "symbol: ...", URL, title or citation;
-                               -f reads a list, .bib, .ris or .tsv file
+  add <input...> [-f file]     queue works: DOI, arXiv id, ISBN, "pmid: ...", PMCID,
+                               "md5: ...", "celex: ...", "symbol: ...", URL, or a title
+                               or citation; -f reads a list, .bib, .ris or .tsv file
   run [id...]                  process the works that are due (or the given ones)
   status                       counts per status and what needs a look
   show <id>                    print one work record
@@ -39,7 +41,24 @@ const HELP = `litfetch: queue, fetch and verify literature
 Library: ${config.library}
 Settings: environment or .env, see .env.example`;
 
-const pick = (works, ids, status) => works.filter((w) => (ids.length ? ids.includes(w.id) : w.status === status));
+/** The works named in `ids`, or else those with `status`; unknown ids are an error. */
+async function pick(ids, status) {
+  const works = await store.list();
+  if (!ids.length) return works.filter((w) => w.status === status);
+  const unknown = ids.filter((id) => !works.some((w) => w.id === id));
+  if (unknown.length) throw new Error(`no such work: ${unknown.join(", ")}`);
+  return works.filter((w) => ids.includes(w.id));
+}
+
+/** Run `fn` holding the library lock. */
+async function locked(fn) {
+  const release = await store.lock();
+  try {
+    return await fn();
+  } finally {
+    await release();
+  }
+}
 
 const commands = {
   async add(args, opts) {
@@ -55,71 +74,82 @@ const commands = {
     console.log(`${added} added`);
   },
 
-  async run(ids) {
-    console.log(`sources: ${activeSources().map((s) => s.id).join(", ")}`);
-    if (llmEnabled()) {
-      console.log(`model triage on (${config.llmModels.join(", ")}): opening pages of uncertain files go to the Anthropic API`);
-    }
-    const done = await run({
-      ids: ids.length ? ids : undefined,
-      onDone: (w) => console.log(`${w.status.padEnd(9)} ${w.id}${w.error ? `  (${w.error})` : ""}`),
-    });
-    console.log(`${done.length} processed; overview in ${join(config.library, "index.csv")}`);
-  },
+  run: (ids) =>
+    locked(async () => {
+      if (ids.length) await pick(ids);
+      console.log(`sources: ${activeSources().map((s) => s.id).join(", ")}`);
+      if (llmEnabled()) {
+        console.log(`model triage on (${config.llmModels.join(", ")}): opening pages of uncertain files go to the Anthropic API`);
+      }
+      const done = await run({
+        ids: ids.length ? ids : undefined,
+        onDone: (w) => console.log(`${w.status.padEnd(9)} ${w.id}${w.error ? `  (${w.error})` : ""}`),
+      });
+      console.log(`${done.length} processed; overview in ${join(config.library, "index.csv")}`);
+    }),
 
   async status() {
     const works = await store.list();
     for (const s of store.STATUSES) console.log(`${s.padEnd(9)} ${works.filter((w) => w.status === s).length}`);
     for (const w of works.filter((w) => ["review", "waiting", "not_found"].includes(w.status))) {
-      const why = w.status === "review"
-        ? w.checks.filter((c) => c.status !== "pass").map((c) => `${c.name}: ${c.detail}`).join("; ")
-        : `${w.error}; next try ${w.nextTry}`;
+      const why =
+        w.status === "review"
+          ? w.checks.filter((c) => c.status !== "pass").map((c) => `${c.name}: ${c.detail}`).join("; ")
+          : `${w.error}; next try ${w.nextTry}`;
       console.log(`\n${w.status} ${w.id}\n  ${why}`);
     }
   },
 
   async show([id]) {
     const work = await store.load(id);
-    if (!work) throw new Error(`no work ${id}`);
+    if (!work) throw new Error(`no such work: ${id}`);
     console.log(JSON.stringify(work, null, 2));
   },
 
-  async retry(ids, opts) {
-    const works = pick(await store.list(), ids, opts.status);
-    for (const w of works) await store.save({ ...w, status: "queued", nextTry: null });
-    await store.writeIndex();
-    console.log(`${works.length} queued; a kept file is replaced only by a strictly better one`);
-  },
+  retry: (ids, opts) =>
+    locked(async () => {
+      if (!ids.length && !opts.status) throw new Error("name the works, or give --status");
+      const works = await pick(ids, opts.status);
+      for (const w of works) await store.save({ ...w, status: "queued", nextTry: null });
+      await store.writeIndex();
+      console.log(`${works.length} queued; a kept file is replaced only by a strictly better one`);
+    }),
 
-  async close(ids) {
-    if (!ids.length) throw new Error("name the works to close");
-    const works = pick(await store.list(), ids);
-    for (const w of works) await store.save({ ...w, status: "closed", nextTry: null });
-    await store.writeIndex();
-    console.log(`${works.length} closed`);
-  },
+  close: (ids) =>
+    locked(async () => {
+      if (!ids.length) throw new Error("name the works to close");
+      const works = await pick(ids);
+      for (const w of works) await store.save({ ...w, status: "closed", nextTry: null });
+      await store.writeIndex();
+      console.log(`${works.length} closed`);
+    }),
 
-  async recheck(ids) {
-    const works = (await store.list()).filter((w) => w.file);
-    const holders = new Map(works.map((w) => [w.file.sha256, w.id]));
-    for (const w of works.filter((w) => !ids.length || ids.includes(w.id))) {
-      const result = await checkFile({
-        path: store.filePath(w),
-        file: w.file,
-        expected: { md5: w.file.referenceMd5 },
-        meta: w.meta,
-        kind: w.kind,
-        language: w.query.language,
-        candidates: w.candidates,
-        duplicates: new Map([...holders].filter(([, id]) => id !== w.id)),
-      });
-      w.checks = result.checks;
-      w.status = result.verdict === "pass" ? "done" : "review";
-      await store.save(w);
-      console.log(`${w.status.padEnd(9)} ${w.id}`);
-    }
-    await store.writeIndex();
-  },
+  recheck: (ids) =>
+    locked(async () => {
+      const all = await store.list();
+      const holders = new Map(all.filter((w) => w.file).map((w) => [w.file.sha256, w.id]));
+      const works = ids.length ? await pick(ids) : all.filter((w) => w.file && w.status !== "closed");
+      for (const w of works.filter((w) => w.file)) {
+        try {
+          const result = await checkFile({
+            path: store.filePath(w),
+            file: w.file,
+            expected: { md5: w.file.referenceMd5 },
+            meta: w.meta,
+            kind: w.kind,
+            language: w.query.language,
+            duplicates: new Map([...holders].filter(([, id]) => id !== w.id)),
+          });
+          w.checks = [...result.checks, ...workChecks({ meta: w.meta, candidates: w.candidates })];
+          w.status = verdictOf(w.checks) === "pass" ? "done" : "review";
+          await store.save(w);
+          console.log(`${w.status.padEnd(9)} ${w.id}`);
+        } catch (err) {
+          console.log(`error     ${w.id}  (${err.message})`);
+        }
+      }
+      await store.writeIndex();
+    }),
 
   async find(args) {
     const query = parseInput(args.join(" "));
@@ -131,11 +161,13 @@ const commands = {
   async sources() {
     const active = new Set(activeSources().map((s) => s.id));
     for (const s of Object.values(SOURCES)) {
+      const listed = config.sources.includes(s.id);
+      const missing = s.missing();
       const state = active.has(s.id)
         ? "active"
-        : s.missing().length
-          ? `needs ${s.missing().join(", ")}`
-          : "off (not in LITFETCH_SOURCES)";
+        : !listed
+          ? `off (add to LITFETCH_SOURCES${missing.length ? `; needs ${missing.join(", ")}` : ""})`
+          : `needs ${missing.join(", ")}`;
       console.log(`${s.id.padEnd(16)} ${s.name.padEnd(38)} ${state}`);
     }
   },

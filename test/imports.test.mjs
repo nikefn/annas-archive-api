@@ -33,3 +33,12 @@ test("TSV evaluation sets and plain lists", () => {
   ]);
   assert.deepEqual(parseList("# reading list\n10.1/a\n\narXiv:1706.03762\n", "list.txt").map((i) => i.input), ["10.1/a", "arXiv:1706.03762"]);
 });
+
+test("BibTeX entry types become kinds the checks understand", () => {
+  const types = parseList("@inbook{a, title={A}}\n@incollection{b, title={B}}\n@phdthesis{c, title={C}}\n@misc{d, title={D}}", "x.bib").map((i) => i.hints.type);
+  assert.deepEqual(types, ["chapter", "chapter", "thesis", undefined]);
+});
+
+test("an empty TSV is an empty list", () => {
+  assert.deepEqual(parseList("", "set.tsv"), []);
+});

@@ -6,7 +6,7 @@
  */
 
 import { config } from "../config.js";
-import { client } from "../http.js";
+import { client, isOutage } from "../http.js";
 import { bareDoi, searchTerms, yearOf } from "./meta.js";
 
 const http = client();
@@ -48,7 +48,11 @@ export default {
     const query = q.doi ? `"${q.doi}"` : q.title ? searchTerms(q.title) : null;
     if (!query) return [];
     const settled = await Promise.allSettled(config.dspaceRepositories.map((base) => search(base, query)));
-    return settled.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+    const found = settled.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
+    // Nothing found while a repository was down: the work may be there, so report the outage.
+    const down = settled.find((r) => r.status === "rejected" && isOutage(r.reason));
+    if (!found.length && down) throw down.reason;
+    return found;
   },
 
   /** The ORIGINAL bundle's first bitstream, with its md5 when the repository reports one. */

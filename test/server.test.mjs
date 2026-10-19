@@ -43,3 +43,23 @@ test("a mirror outside the allowlist is refused before any request", async () =>
     assert.match((await resp.json()).error, /unknown mirror/);
   }
 });
+
+test("odd input gets a JSON answer, never a stack trace", async () => {
+  const repeated = await fetch(`${base}/api/search?query=a&query=b&tld=evil`, { headers: { Authorization: "Bearer k" } });
+  assert.equal(repeated.status, 400);
+  const malformed = await fetch(`${base}/api/queue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Litfetch-Token": "test-token-123" },
+    body: "{not json",
+  });
+  assert.equal(malformed.status, 400);
+  assert.deepEqual(Object.keys(await malformed.json()), ["error"]);
+});
+
+test("pages may only run the server's own scripts", async () => {
+  const resp = await fetch(`${base}/`);
+  assert.equal(resp.status, 200);
+  assert.match(resp.headers.get("content-security-policy"), /default-src 'self'/);
+  assert.equal(resp.headers.get("x-powered-by"), null);
+  assert.doesNotMatch(await resp.text(), /onclick|<script>/);
+});

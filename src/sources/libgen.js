@@ -10,7 +10,7 @@
 import { load } from "cheerio";
 
 import { config } from "../config.js";
-import { client, mirrorSet } from "../http.js";
+import { client, isOutage, mirrorSet } from "../http.js";
 import { bareDoi, yearOf } from "./meta.js";
 
 const http = client();
@@ -35,6 +35,7 @@ export function toCandidate(edition, md5) {
   return {
     meta: {
       title: [edition.title, edition.title_add].filter(Boolean).join(": ") || undefined,
+      isbn: Object.values(edition.add ?? {}).filter((a) => /isbn/i.test(a.name_en)).map((a) => a.value),
       authors: String(edition.author ?? "").split(/;\s*/).filter(Boolean),
       year: yearOf(edition.year),
       doi: bareDoi(edition.doi || undefined),
@@ -92,16 +93,21 @@ export default {
 
   /** Each mirror's download page carries a fresh "get.php?md5=...&key=..." link. */
   async *links({ md5 }) {
+    let outage = null;
+    let offered = false;
     for (const mirror of mirrors.ordered()) {
       let href;
       try {
         href = load(await http.text(`${mirror}/ads.php?md5=${md5}`))('a[href*="get.php?md5="]').attr("href");
-      } catch {
+      } catch (err) {
+        if (isOutage(err)) outage = err;
         continue;
       }
       if (!href) continue;
+      offered = true;
       mirrors.worked(mirror);
       yield { url: new URL(href, `${mirror}/`).toString(), md5 };
     }
+    if (!offered && outage) throw outage;
   },
 };

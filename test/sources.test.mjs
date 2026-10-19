@@ -9,10 +9,16 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import * as arxiv from "../src/sources/arxiv.js";
+import * as core from "../src/sources/core.js";
 import * as crossref from "../src/sources/crossref.js";
 import * as dspace from "../src/sources/dspace.js";
+import * as europepmc from "../src/sources/europepmc.js";
+import * as hal from "../src/sources/hal.js";
 import * as libgen from "../src/sources/libgen.js";
+import * as openaire from "../src/sources/openaire.js";
 import * as openalex from "../src/sources/openalex.js";
+import * as openlibrary from "../src/sources/openlibrary.js";
+import * as semanticscholar from "../src/sources/semanticscholar.js";
 import * as unpaywall from "../src/sources/unpaywall.js";
 import * as web from "../src/sources/web.js";
 import * as worldbank from "../src/sources/worldbank.js";
@@ -156,4 +162,71 @@ test("libgen: file record gives name, size and format", () => {
   const info = libgen.describeFile({ 93485370: { locator: "Book (2018).pdf", filesize: "18298205", extension: "pdf" } });
   assert.deepEqual(info, { name: "Book (2018).pdf", size: 18298205, format: "pdf" });
   assert.deepEqual(libgen.describeFile([]), {});
+});
+
+test("openlibrary: ISBN lists, and scans only for public-domain books", () => {
+  const open = openlibrary.toCandidate({
+    title: "Moby Dick",
+    subtitle: "or, The Whale",
+    author_name: ["Herman Melville"],
+    first_publish_year: 1851,
+    isbn: ["9780142437247"],
+    number_of_pages_median: 654,
+    ebook_access: "public",
+    ia: ["mobydickorwhale00melv"],
+  });
+  assert.equal(open.meta.title, "Moby Dick: or, The Whale");
+  assert.deepEqual(open.meta.isbn, ["9780142437247"]);
+  assert.deepEqual(open.files.map((f) => f.url), ["https://archive.org/download/mobydickorwhale00melv/mobydickorwhale00melv.pdf"]);
+  assert.deepEqual(openlibrary.toCandidate({ title: "X", ebook_access: "borrowable", ia: ["x"] }).files, []);
+});
+
+test("europepmc: open-access PDF links only", () => {
+  const c = europepmc.toCandidate({
+    title: "A study.",
+    doi: "10.1136/BMJ.L5302",
+    pmid: "31533922",
+    pmcid: "PMC6753637",
+    pubYear: "2019",
+    authorList: { author: [{ fullName: "Doe J" }] },
+    fullTextUrlList: {
+      fullTextUrl: [
+        { documentStyle: "pdf", availability: "Open access", url: "https://europepmc.org/a.pdf" },
+        { documentStyle: "html", availability: "Open access", url: "https://europepmc.org/a" },
+        { documentStyle: "pdf", availability: "Subscription required", url: "https://pub.example/a.pdf" },
+      ],
+    },
+  });
+  assert.equal(c.meta.title, "A study");
+  assert.equal(c.meta.doi, "10.1136/bmj.l5302");
+  assert.deepEqual(c.files, [{ url: "https://europepmc.org/a.pdf" }]);
+});
+
+test("semanticscholar: identifiers and the open-access PDF", () => {
+  const c = semanticscholar.toCandidate({
+    title: "Faster sorting algorithms",
+    externalIds: { DOI: "10.1038/s41586-023-06004-9", PubMed: "37286649", PubMedCentral: "10247365" },
+    openAccessPdf: { url: "https://www.nature.com/articles/s41586-023-06004-9.pdf", license: "CCBY" },
+  });
+  assert.equal(c.meta.pmcid, "PMC10247365");
+  assert.equal(c.files[0].license, "CCBY");
+});
+
+test("core, hal, openaire: download links", () => {
+  assert.deepEqual(core.toCandidate({ title: "T", doi: "10.1/X", downloadUrl: "https://core.ac.uk/download/1.pdf" }).files, [
+    { url: "https://core.ac.uk/download/1.pdf" },
+  ]);
+  const h = hal.toCandidate({ title_s: ["Rapport"], authFullName_s: ["Jean Dupont"], producedDateY_i: 2021, fileMain_s: "https://hal.science/hal-1/document" });
+  assert.equal(h.meta.title, "Rapport");
+  assert.equal(h.files[0].url, "https://hal.science/hal-1/document");
+  const o = openaire.toCandidate({
+    mainTitle: "Deliverable 3.2",
+    pids: [{ scheme: "doi", value: "10.5281/zenodo.9" }],
+    instances: [
+      { accessRight: { label: "OPEN" }, urls: ["https://zenodo.org/d32.pdf"] },
+      { accessRight: { label: "RESTRICTED" }, urls: ["https://closed.example/d32.pdf"] },
+    ],
+  });
+  assert.equal(o.meta.doi, "10.5281/zenodo.9");
+  assert.deepEqual(o.files, [{ url: "https://zenodo.org/d32.pdf" }]);
 });

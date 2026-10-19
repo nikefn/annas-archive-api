@@ -42,7 +42,7 @@ export default {
         meta,
         files: [
           {
-            url: `http://publications.europa.eu/resource/celex/${q.celex}`,
+            url: `https://publications.europa.eu/resource/celex/${q.celex}`,
             headers: { Accept: "application/pdf", "Accept-Language": "en" },
           },
         ],

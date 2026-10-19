@@ -38,7 +38,8 @@ export default {
 
   async find(q) {
     const params = new URLSearchParams({ api_key: config.keys.openalex });
-    const id = q.doi ? `doi:${q.doi}` : q.pmid ? `pmid:${q.pmid}` : q.pmcid ? `pmcid:${q.pmcid}` : null;
+    const doi = q.doi && encodeURIComponent(q.doi).replace(/%2F/gi, "/");
+    const id = doi ? `doi:${doi}` : q.pmid ? `pmid:${q.pmid}` : q.pmcid ? `pmcid:${q.pmcid}` : null;
     if (id) {
       const w = await http.lookup(`${API}/${id}?${params}`);
       return w ? [toCandidate(w)] : [];

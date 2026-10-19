@@ -9,11 +9,12 @@ const STOPWORDS = new Set(
     .split(" ")
 );
 
+/** Text with accents removed ("Ökonomie" -> "Okonomie"). */
+export const asciiFold = (text) => String(text ?? "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+
 /** Lowercase, strip accents and punctuation, collapse whitespace. */
 export function normalise(text) {
-  return String(text ?? "")
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
+  return asciiFold(text)
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .trim();
@@ -104,4 +105,17 @@ export function detectLanguage(text) {
   );
   const [[lang, top], [, second]] = scores;
   return top >= 20 && top >= 2 * second ? lang : null;
+}
+
+const LANGUAGE_NAMES = {
+  eng: "en", english: "en", ger: "de", deu: "de", german: "de", ngerman: "de", deutsch: "de",
+  fre: "fr", fra: "fr", french: "fr", francais: "fr", spa: "es", spanish: "es", ita: "it", italian: "it",
+  por: "pt", portuguese: "pt", dut: "nl", nld: "nl", dutch: "nl",
+};
+
+/** ISO 639-1 code from a 2-letter code, a 3-letter code or an English or BibTeX name; else undefined. */
+export function languageCode(value) {
+  const v = asciiFold(value).trim().toLowerCase();
+  if (/^[a-z]{2}$/.test(v)) return v;
+  return LANGUAGE_NAMES[v];
 }

@@ -1,8 +1,9 @@
 /**
- * The only place that talks to the network. Every request gets a browser-like
- * User-Agent, a header timeout, retries on 429/5xx/network errors (honouring
- * Retry-After) and the per-host pace from config. Bot checks are recognised and
- * raised as code "CHALLENGE"; they are never solved.
+ * Every request litfetch makes goes through here (the optional Anthropic SDK in
+ * checks/llm.js makes its own). Each request gets a browser-like User-Agent,
+ * the per-host pace from config, a timeout that starts once the pace allows the
+ * request, and retries on 429, 5xx and network errors (honouring Retry-After).
+ * Bot checks are recognised and raised as code "CHALLENGE"; they are never solved.
  */
 
 import { config } from "./config.js";
@@ -21,12 +22,14 @@ export class HttpError extends Error {
   }
 }
 
-/** Codes of temporary failures; together with 429, 5xx and network errors they are outages. */
-const TRANSIENT = new Set(["CHALLENGE", "NO_CREDITS", "TIMEOUT", "STALLED", "TOO_SLOW", "TOO_LONG", "INCOMPLETE"]);
+/** Codes of temporary failures. With 429 and 5xx responses they make up the outages. */
+const TRANSIENT = new Set(["NETWORK", "TIMEOUT", "CHALLENGE", "NO_CREDITS", "STALLED", "TOO_SLOW", "TOO_LONG", "INCOMPLETE"]);
 
 /** An outage says nothing about whether the work exists, so it does not count as a try. */
-export const isOutage = (err) =>
-  TRANSIENT.has(err?.code) || err?.status === 0 || err?.status === 429 || err?.status >= 500;
+export const isOutage = (err) => TRANSIENT.has(err?.code) || err?.status === 429 || err?.status >= 500;
+
+/** Network errors that will not go away by waiting: bad URL, unknown host, broken certificate. */
+const PERMANENT = /ENOTFOUND|INVALID_URL|Invalid URL|parse URL|CERT|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_SSL|UNKNOWN_SCHEME|not implemented/i;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -65,12 +68,20 @@ export const hostOf = (url) => {
   }
 };
 
+function networkError(err, host) {
+  const detail = `${err.cause?.code ?? ""} ${err.cause?.message ?? ""} ${err.message}`;
+  const permanent = PERMANENT.test(detail);
+  return new HttpError(`${err.cause?.code ?? err.message} (${host})`, 0, permanent ? "UNREACHABLE" : "NETWORK");
+}
+
 /**
- * One request. `timeoutMs` bounds the wait for response headers only; pass a
- * `signal` to bound the body. Error messages name the host, never the URL,
- * because URLs can carry keys and errors end up in work records.
+ * One request. `timeoutMs` bounds the wait for response headers; `totalMs`, if
+ * given, bounds the whole exchange including the body read by the caller, and
+ * the response then carries that signal as `resp.deadline`. Both start after
+ * pacing. Error messages name the host, never the URL, because URLs can carry
+ * keys and errors end up in work records.
  */
-export async function request(url, { headers = {}, timeoutMs = config.timeoutMs, signal, ...options } = {}) {
+export async function request(url, { headers = {}, timeoutMs = config.timeoutMs, totalMs, signal, ...options } = {}) {
   const host = hostOf(url);
   for (let attempt = 0; ; attempt++) {
     await pace(host);
@@ -79,17 +90,16 @@ export async function request(url, { headers = {}, timeoutMs = config.timeoutMs,
       () => headerTimer.abort(new HttpError(`no response from ${host} in ${timeoutMs / 1000} s`, 0, "TIMEOUT")),
       timeoutMs
     );
+    const deadline = totalMs ? AbortSignal.timeout(totalMs) : null;
+    const signals = [headerTimer.signal, deadline, signal].filter(Boolean);
     let resp;
     try {
-      resp = await fetch(url, {
-        ...options,
-        headers: { "User-Agent": USER_AGENT, ...headers },
-        signal: signal ? AbortSignal.any([headerTimer.signal, signal]) : headerTimer.signal,
-      });
+      resp = await fetch(url, { ...options, headers: { "User-Agent": USER_AGENT, ...headers }, signal: AbortSignal.any(signals) });
     } catch (err) {
-      if (err instanceof HttpError) throw err;
-      if (signal?.aborted) throw asHttpError(signal.reason, host);
-      if (attempt >= RETRIES) throw new HttpError(`${err.message} (${host})`, 0);
+      const aborted = signals.find((s) => s.aborted);
+      if (aborted) throw asHttpError(aborted.reason, host);
+      const failure = networkError(err, host);
+      if (failure.code === "UNREACHABLE" || attempt >= RETRIES) throw failure;
       await sleep(1000 * 2 ** attempt);
       continue;
     } finally {
@@ -101,7 +111,7 @@ export async function request(url, { headers = {}, timeoutMs = config.timeoutMs,
       throw new HttpError(`bot check (${check}) at ${host}`, resp.status, "CHALLENGE");
     }
     const retryable = resp.status === 429 || resp.status >= 500;
-    if (!retryable || attempt >= RETRIES) return resp;
+    if (!retryable || attempt >= RETRIES) return Object.assign(resp, { deadline });
     await resp.body?.cancel();
     const after = Number(resp.headers.get("retry-after"));
     await sleep(after > 0 ? Math.min(after, 60) * 1000 : 1000 * 2 ** attempt);
@@ -113,8 +123,7 @@ const asHttpError = (reason, host) =>
 
 /** API calls: the whole exchange, body included, must finish within the timeout. */
 async function body(url, options, read) {
-  const signal = AbortSignal.timeout(config.timeoutMs);
-  const resp = await request(url, { signal, ...options });
+  const resp = await request(url, { totalMs: config.timeoutMs, ...options });
   if (!resp.ok) {
     await resp.body?.cancel();
     throw new HttpError(`HTTP ${resp.status} (${hostOf(url)})`, resp.status);
@@ -122,7 +131,7 @@ async function body(url, options, read) {
   try {
     return await read(resp);
   } catch (err) {
-    if (signal.aborted) throw asHttpError(signal.reason, hostOf(url));
+    if (resp.deadline?.aborted) throw asHttpError(resp.deadline.reason, hostOf(url));
     throw err;
   }
 }
@@ -148,8 +157,9 @@ export function client({ headers = {} } = {}) {
 
 /**
  * Interchangeable mirrors of one site. `ordered()` lists them starting with the
- * one that last worked; `run(fn)` tries them in that order, moving on only when
- * a mirror has an outage.
+ * one that last worked; `run(fn)` tries them in that order and moves on when a
+ * mirror is down or challenges. Running out of credits is an account matter, so
+ * it ends the search instead.
  */
 export function mirrorSet(bases) {
   let preferred = bases[0];

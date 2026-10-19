@@ -30,7 +30,8 @@ export async function download(url, dest, { headers, limits = {} } = {}) {
     await resp.body?.cancel();
     throw new HttpError(`HTTP ${resp.status}`, resp.status);
   }
-  const declared = Number(resp.headers.get("content-length")) || null;
+  // With Content-Encoding, Content-Length counts the compressed bytes, not what is read here.
+  const declared = resp.headers.get("content-encoding") ? null : Number(resp.headers.get("content-length")) || null;
   if (declared > lim.maxBytes) {
     await resp.body?.cancel();
     throw new HttpError(`larger than ${lim.maxBytes} bytes`, 0, "TOO_LARGE");

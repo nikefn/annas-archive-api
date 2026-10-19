@@ -11,10 +11,8 @@
     "litfetch": "src/cli.js"
   },
   "scripts": {
-    "litfetch": "node src/cli.js",
     "ui": "node server/index.js",
-    "start": "node server/index.js",
-    "test": "node --test"
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.135.0",

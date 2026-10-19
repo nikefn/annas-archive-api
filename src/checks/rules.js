@@ -1,10 +1,11 @@
 /**
- * The quality standard: every check a downloaded file goes through, in order.
- * Each rule returns { status: "pass" | "warn" | "fail", detail } or null when
- * it does not apply. A file's verdict is its worst status:
- *   fail -> file rejected, next candidate tried
- *   warn -> file kept, work marked "review"
- *   pass -> file kept, work marked "done"
+ * The quality standard. FILE_RULES judge a downloaded file; WORK_RULES judge
+ * the work's merged metadata and are the same for every file. Each rule returns
+ * { status: "pass" | "warn" | "fail", detail }, or null when it does not apply.
+ *
+ * A file's verdict is its worst file check: fail rejects it, and between kept
+ * candidates pass beats warn. A work is "done" when its kept file and the work
+ * checks all pass, otherwise "review".
  */
 
 import { ACCEPTED_FORMATS } from "./file.js";
@@ -29,7 +30,7 @@ const hasTextLayer = ({ doc }) =>
   doc.pageTexts.length > 0 &&
   doc.pageTexts.join("").length / doc.pageTexts.length >= MIN_CHARS_PER_PAGE;
 
-export const RULES = [
+export const FILE_RULES = [
   ["format", ({ doc }) =>
     ACCEPTED_FORMATS.includes(doc.format) ? pass(doc.format) : fail(`not a document: ${doc.format}`)],
 
@@ -105,6 +106,9 @@ export const RULES = [
     return found === language ? pass(found) : fail(`text is ${found}, work wants ${language}`);
   }],
 
+];
+
+export const WORK_RULES = [
   ["metadata-complete", ({ meta }) => {
     const missing = ["title", "authors", "year"].filter((k) => !(meta[k]?.length ?? meta[k]));
     return missing.length ? warn(`missing ${missing.join(", ")}`) : pass("title, authors, year");
@@ -125,17 +129,20 @@ export const RULES = [
   ["retraction", ({ meta }) => (meta.retracted ? warn("marked as retracted") : null)],
 ];
 
-/** Run the rules in order, stopping at the first failure. */
-export function evaluate(ctx) {
+/** Apply rules in order; file rules stop at the first failure. */
+function apply(rules, scope, ctx) {
   const checks = [];
-  for (const [name, rule] of RULES) {
+  for (const [name, rule] of rules) {
     const result = rule(ctx);
     if (!result) continue;
-    checks.push({ name, ...result });
+    checks.push({ name, scope, ...result });
     if (result.status === "fail") break;
   }
   return checks;
 }
+
+export const fileChecks = (ctx) => apply(FILE_RULES, "file", ctx);
+export const workChecks = (ctx) => apply(WORK_RULES, "work", ctx);
 
 const RANK = { pass: 0, warn: 1, fail: 2 };
 

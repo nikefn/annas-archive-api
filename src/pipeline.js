@@ -4,22 +4,21 @@
  * gather  ask every active source; keep candidates that match the work
  * merge   one metadata record, each field from the first source that has it
  * try     candidate files in rank.js order, up to LITFETCH_MAX_ATTEMPTS downloads;
- *         every file goes through checks/rules.js
- * keep    a file replaces the kept one only if it is strictly better
- *         (pass > warn > nothing); a replaced file moves to _replaced/
- * settle  done | review     a file is kept
- *         waiting           no file, and a source had an outage: retry within hours, not a try
- *         not_found         no file and no outage: tries + 1, retry after 1, 3, 7, 14, then 30 days
+ *         each goes through the file checks, and the first that passes ends the search
+ * keep    a file replaces the kept one only if it is strictly better (pass beats
+ *         warn); the replaced file moves to _replaced/
+ * settle  the kept file's checks plus the work checks give done or review; without
+ *         a file, an outage gives waiting (not a try) and anything else not_found
  *
- * A pass (one `run`) shares state between works: sources paused after a bot
- * check, credited links spent per work, and download failures per host.
+ * Works of one run share state: sources paused after a bot check, credited
+ * links spent per work, and download failures per host.
  */
 
-import { rename, rm } from "node:fs/promises";
+import { readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { checkFile } from "./checks/index.js";
-import { verdictOf } from "./checks/rules.js";
+import { verdictOf, workChecks } from "./checks/rules.js";
 import { config } from "./config.js";
 import { download } from "./download.js";
 import { hostOf, isOutage } from "./http.js";
@@ -27,14 +26,14 @@ import { ID_KINDS, normaliseId, slug } from "./ids.js";
 import { excerptSignal, rankFiles, workKind } from "./rank.js";
 import { activeSources } from "./sources/index.js";
 import * as store from "./store.js";
-import { normalise, surname, titleMatch } from "./text.js";
+import { languageCode, normalise, surname, titleMatch } from "./text.js";
 
 const NOT_FOUND_DAYS = [1, 3, 7, 14, 30];
+const WAITING_HOURS = [6, 12, 24, 72, 168];
 const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
 const QUALITY = { pass: 2, warn: 1 };
 
-export const newPass = () => ({ paused: new Map(), spent: new Map(), failures: new Map() });
+export const newRunState = () => ({ paused: new Map(), spent: new Map(), failures: new Map() });
 
 /** Whether a work is due for a run at `now`. */
 export function isDue(work, now = Date.now()) {
@@ -43,20 +42,25 @@ export function isDue(work, now = Date.now()) {
   return !work.nextTry || Date.parse(work.nextTry) <= now;
 }
 
-/** Run every due work, or exactly the works in `ids`. */
+/** Run every due work, or exactly the works in `ids`. A failing work does not stop the others. */
 export async function run({ ids, onDone = () => {} } = {}) {
   store.assertLibrary();
   const sources = activeSources();
   const all = await store.list();
   const duplicates = new Map(all.filter((w) => w.file).map((w) => [w.file.sha256, w.id]));
   const todo = all.filter((w) => (ids ? ids.includes(w.id) : isDue(w)));
-  const pass = newPass();
+  const shared = newRunState();
 
   const done = [];
   const workers = Array.from({ length: Math.min(config.concurrency, todo.length) }, async () => {
     while (todo.length) {
       const work = todo.shift();
-      await processWork(work, sources, { duplicates, pass });
+      try {
+        await processWork(work, sources, { duplicates, shared });
+      } catch (err) {
+        work.error = `run failed: ${err.message}`;
+        await store.save(work);
+      }
       done.push(work);
       onDone(work);
     }
@@ -66,63 +70,74 @@ export async function run({ ids, onDone = () => {} } = {}) {
   return done;
 }
 
-export async function processWork(work, sources, { duplicates = new Map(), pass = newPass() } = {}) {
+export async function processWork(work, sources, { duplicates = new Map(), shared = newRunState() } = {}) {
   const started = Date.now();
   const outages = [];
   const firstAttempt = work.attempts.length;
+  await removeLeftovers(work);
   work.error = null;
   work.lookups = [];
-  work.candidates = await gather(work.query, sources, { lookups: work.lookups, outages, pass });
+  work.candidates = await gather(work.query, sources, { lookups: work.lookups, outages, shared });
   work.meta = mergeMeta(work.query, work.candidates);
   work.kind = workKind(work.query, work.meta);
-  const best = await tryFiles(work, sources, { duplicates, pass, outages });
+  const best = await tryFiles(work, sources, { duplicates, shared, outages });
   await settle(work, best, outages, work.attempts.slice(firstAttempt));
   if (best) duplicates.set(best.file.sha256, work.id);
   work.lastRunMs = Date.now() - started;
   return store.save(work);
 }
 
-/** Note a source failure; a bot check pauses that source for the rest of the pass. */
-function noteOutage(source, err, { outages, pass }) {
+/** Temp files an interrupted run left in the work's folder. */
+async function removeLeftovers(work) {
+  const dir = store.workDir(work.id);
+  const names = await readdir(dir).catch(() => []);
+  for (const name of names.filter((n) => /\.(tmp|part)$/.test(n))) await rm(join(dir, name), { force: true });
+}
+
+/** Note a source failure; a bot check pauses that source for the rest of the run. */
+function noteOutage(source, err, { outages, shared }) {
   outages.push({ source, reason: err.message, retryAt: err.retryAt });
-  if (err.code === "CHALLENGE") pass.paused.set(source, err.message);
+  if (err.code === "CHALLENGE") shared.paused.set(source, err.message);
 }
 
 /**
- * Ask every source. If the answers reveal identifiers or a title the query
- * lacked, sources that found nothing are asked once more with the enriched query.
+ * Ask every source once. If the answers reveal identifiers or a title the query
+ * lacked, every answer is matched again against the enriched query, and the
+ * sources that returned nothing are asked once more with it.
  */
-export async function gather(query, sources, { lookups = [], outages = [], pass = newPass() } = {}) {
-  const ask = async (q, list) => {
-    const results = await Promise.all(
+export async function gather(query, sources, { lookups = [], outages = [], shared = newRunState() } = {}) {
+  const raw = new Map(); // source id -> everything it returned
+
+  const ask = (q, list) =>
+    Promise.all(
       list.map(async (s) => {
-        if (pass.paused.has(s.id)) {
-          outages.push({ source: s.id, reason: pass.paused.get(s.id) });
-          lookups.push({ source: s.id, found: 0, error: `paused: ${pass.paused.get(s.id)}` });
-          return [];
+        if (shared.paused.has(s.id)) {
+          outages.push({ source: s.id, reason: shared.paused.get(s.id) });
+          lookups.push({ source: s.id, found: 0, error: `paused: ${shared.paused.get(s.id)}` });
+          return;
         }
         try {
-          const found = (await s.find(q))
-            .map((c) => ({ source: s.id, ...c, tier: matches(q, c) }))
-            .filter((c) => c.tier);
-          lookups.push({ source: s.id, found: found.length });
-          return found;
+          raw.set(s.id, (await s.find(q)).map((c) => ({ source: s.id, ...c })));
         } catch (err) {
           lookups.push({ source: s.id, found: 0, error: err.message });
-          if (isOutage(err)) noteOutage(s.id, err, { outages, pass });
-          return [];
+          if (isOutage(err)) noteOutage(s.id, err, { outages, shared });
         }
       })
     );
-    return results.flat();
-  };
+  const matching = (q) =>
+    [...raw.values()].flat().map((c) => ({ ...c, tier: matches(q, c) })).filter((c) => c.tier);
 
-  let candidates = await ask(query, sources);
-  const merged = mergeMeta(query, candidates);
+  await ask(query, sources);
+  let q = query;
+  const merged = mergeMeta(query, matching(query));
   const enriched = { ...idsOf(merged), title: merged.title, ...query };
   if (Object.keys(enriched).some((k) => enriched[k] && !query[k])) {
-    const answered = new Set(candidates.map((c) => c.source));
-    candidates = candidates.concat(await ask(enriched, sources.filter((s) => !answered.has(s.id))));
+    q = enriched;
+    await ask(q, sources.filter((s) => raw.has(s.id) && !raw.get(s.id).length));
+  }
+  const candidates = matching(q);
+  for (const s of sources) {
+    if (raw.has(s.id)) lookups.push({ source: s.id, found: candidates.filter((c) => c.source === s.id).length });
   }
   const rank = (c) => sources.findIndex((s) => s.id === c.source);
   return candidates.sort((a, b) => rank(a) - rank(b));
@@ -161,7 +176,10 @@ export function matches(query, candidate) {
   return null;
 }
 
-/** First non-empty value per field in source order; identifiers typed by the user win. */
+/**
+ * First non-empty value per field in source order; identifiers typed by the
+ * user win. The language becomes an ISO 639-1 code where it can.
+ */
 export function mergeMeta(query, candidates) {
   const meta = {};
   for (const c of candidates) {
@@ -172,6 +190,7 @@ export function mergeMeta(query, candidates) {
     }
   }
   meta.retracted = candidates.some((c) => c.meta.retracted) || undefined;
+  if (meta.language) meta.language = languageCode(meta.language) ?? meta.language;
   for (const kind of ID_KINDS) if (query[kind]) meta[kind] = query[kind];
   meta.title ??= query.title;
   meta.authors ??= query.authors;
@@ -179,68 +198,60 @@ export function mergeMeta(query, candidates) {
   return meta;
 }
 
-/**
- * For a book, a file that looks like an excerpt is tried after all others, and
- * a journal-article file never gets a credited link. Files the user named by
- * md5 are exempt. Returns "defer", "free-only" or null.
- */
-function excerptHandling(work, file) {
-  if (work.kind !== "book" || (file.md5 && file.md5 === work.query.md5)) return null;
-  const signal = excerptSignal(file);
-  if (!signal) return null;
-  if (!file.deferred) return "defer";
-  return signal === "article" ? "free-only" : null;
-}
+const fileVerdict = (checks) => verdictOf(checks.filter((c) => c.scope === "file"));
 
-/** Quality of the kept file by its recorded checks: pass 2, anything else 1; no file 0. */
-const keptQuality = (work) => (work.file ? (verdictOf(work.checks) === "pass" ? QUALITY.pass : QUALITY.warn) : 0);
+/** Quality of the kept file by its file checks: pass 2, otherwise 1; no file 0. */
+const keptQuality = (work) => (work.file ? (fileVerdict(work.checks) === "pass" ? QUALITY.pass : QUALITY.warn) : 0);
 
-async function tryFiles(work, sources, { duplicates, pass, outages }) {
+async function tryFiles(work, sources, { duplicates, shared, outages }) {
   const kept = keptQuality(work);
   if (kept === QUALITY.pass) return null; // nothing can be strictly better than a pass
 
   const bySource = Object.fromEntries(sources.map((s) => [s.id, s]));
-  const queue = rankFiles(work.candidates, work.rejectedMd5s);
-  const later = []; // excerpts of a book: small PDFs, then journal-article files
+  const skip = [...work.rejectedMd5s, work.file?.md5, work.file?.referenceMd5].filter(Boolean);
+  const queue = rankFiles(work.candidates, skip);
+  const later = []; // for a book: likely excerpts, small PDFs before journal-article files
   const others = new Map([...duplicates].filter(([, id]) => id !== work.id));
   const dir = store.workDir(work.id);
   let best = null;
   let downloads = 0;
 
   while ((queue.length || later.length) && downloads < config.maxAttempts) {
+    const fromLater = !queue.length;
     const file = queue.shift() ?? later.shift();
     const source = bySource[file.source];
-    if (pass.paused.has(file.source)) {
-      outages.push({ source: file.source, reason: pass.paused.get(file.source) });
+    if (shared.paused.has(file.source)) {
+      outages.push({ source: file.source, reason: shared.paused.get(file.source) });
       continue;
     }
-    if (work.kind === "book" && source.describe && !file.described) {
-      file.described = true;
+    const isBook = work.kind === "book" && file.md5 !== work.query.md5;
+    if (isBook && source.describe && !fromLater) {
       try {
         Object.assign(file, await source.describe(file));
       } catch (err) {
         // Down or out of credits: skip the file. Otherwise try it undescribed.
         if (isOutage(err)) {
-          noteOutage(file.source, err, { outages, pass });
+          noteOutage(file.source, err, { outages, shared });
           continue;
         }
       }
     }
-    const handling = excerptHandling(work, file);
-    if (handling === "defer") {
-      later.push({ ...file, deferred: true });
+    const signal = isBook ? excerptSignal(file) : null;
+    if (signal && !fromLater) {
+      later.push(file);
       later.sort((a, b) => (excerptSignal(a) === "article") - (excerptSignal(b) === "article"));
       continue;
     }
+
     downloads++;
     const tmp = join(dir, `candidate-${work.attempts.length}.tmp`);
     const attempt = { at: new Date().toISOString(), source: file.source, url: file.url ?? null };
     work.attempts.push(attempt);
     const got = await fetchFirst(source, file, tmp, {
       work,
-      pass,
-      allowCredit: handling !== "free-only",
-      onOutage: (err) => noteOutage(file.source, err, { outages, pass }),
+      shared,
+      allowCredit: signal !== "article",
+      onOutage: (err) => noteOutage(file.source, err, { outages, shared }),
     });
     if (got.credit) attempt.credit = true;
     if (!got.download) {
@@ -264,7 +275,6 @@ async function tryFiles(work, sources, { duplicates, pass, outages }) {
       meta: work.meta,
       kind: work.kind,
       language: work.query.language,
-      candidates: work.candidates,
       duplicates: others,
     });
     attempt.verdict = result.verdict;
@@ -292,8 +302,9 @@ async function tryFiles(work, sources, { duplicates, pass, outages }) {
 /**
  * Download the first working link a source offers for a file. Links come from
  * the source's links() (mirrors, gateways, signed URLs) or are the file's own
- * URL. An error from links() is an error of the source; a failed download moves
- * on to the next link.
+ * URL; only http(s) links are followed. An error from links() is an error of
+ * the source. A failed download moves on to the next link, and a bot check on a
+ * file URL means the file is not available there.
  */
 async function fetchFirst(source, file, tmp, ctx) {
   const links = source.links ? source.links(file, ctx) : [{ url: file.url, headers: file.headers }];
@@ -302,13 +313,16 @@ async function fetchFirst(source, file, tmp, ctx) {
   try {
     for await (const link of links) {
       credit ||= Boolean(link.credit);
+      if (!/^https?:\/\//i.test(link.url ?? "")) {
+        reason = "not an http(s) link";
+        continue;
+      }
       try {
         return { download: await download(link.url, tmp, { headers: link.headers }), md5: link.md5, credit };
       } catch (err) {
         reason = err.message;
         const host = hostOf(link.url);
-        ctx.pass.failures.set(host, (ctx.pass.failures.get(host) ?? 0) + 1);
-        // A bot check or a refusal on a file URL means "not here"; other failures are temporary.
+        ctx.shared.failures.set(host, (ctx.shared.failures.get(host) ?? 0) + 1);
         if (isOutage(err) && err.code !== "CHALLENGE") ctx.onOutage(err);
       }
     }
@@ -318,6 +332,9 @@ async function fetchFirst(source, file, tmp, ctx) {
   }
   return { download: null, reason, credit };
 }
+
+/** The gap for the n-th run in a row; the last one repeats. */
+const gapFor = (gaps, n) => gaps[Math.min(n, gaps.length) - 1];
 
 async function settle(work, best, outages, attempts) {
   const now = Date.now();
@@ -338,30 +355,29 @@ async function settle(work, best, outages, attempts) {
       version: best.listed.version ?? null,
       license: best.listed.license ?? null,
     };
-    work.checks = best.result.checks;
-    work.status = best.quality === QUALITY.pass ? "done" : "review";
-    work.tries = 0;
-    work.nextTry = null;
-    return;
   }
   if (work.file) {
-    // The kept file stays, and so does the status its checks give.
-    work.status = keptQuality(work) === QUALITY.pass ? "done" : "review";
+    const fileChecks = best ? best.result.checks : work.checks.filter((c) => c.scope === "file");
+    work.checks = [...fileChecks, ...workChecks({ meta: work.meta, candidates: work.candidates })];
+    work.status = verdictOf(work.checks) === "pass" ? "done" : "review";
+    work.tries = 0;
+    work.waits = 0;
     work.nextTry = null;
     return;
   }
   if (outages.length) {
-    const soonest = Math.min(...outages.map((o) => Date.parse(o.retryAt) || now + config.outageRetryHours * HOUR));
+    work.waits = (work.waits ?? 0) + 1;
+    const fallback = now + gapFor(WAITING_HOURS, work.waits) * HOUR;
     work.status = "waiting";
-    work.nextTry = new Date(soonest).toISOString();
+    work.nextTry = new Date(Math.min(...outages.map((o) => Date.parse(o.retryAt) || fallback))).toISOString();
     work.error = `outage: ${[...new Set(outages.map((o) => `${o.source} (${o.reason})`))].join("; ")}`;
     return;
   }
   const last = attempts.at(-1);
   work.tries = (work.tries ?? 0) + 1;
-  const days = NOT_FOUND_DAYS[Math.min(work.tries, NOT_FOUND_DAYS.length) - 1];
+  work.waits = 0;
   work.status = "not_found";
-  work.nextTry = new Date(now + days * DAY).toISOString();
+  work.nextTry = new Date(now + gapFor(NOT_FOUND_DAYS, work.tries) * 24 * HOUR).toISOString();
   work.error = last ? `no acceptable file; last: ${last.source} ${last.reason ?? last.verdict}` : "no source offered a file";
 }
 

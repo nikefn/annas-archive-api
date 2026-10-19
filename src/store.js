@@ -9,27 +9,22 @@
  *     works/<work-id>/<author>-<year>-<title>.<ext>
  *     _replaced/<work-id>/<time>-<file>    kept files that a better one replaced
  *     _state/<source>.json                  per-source state, e.g. download credits
+ *     .lock                                 held by the command that is changing works
  *
- * Status (see pipeline.js for the transitions):
- *   queued     waiting for its first run
- *   done       a file is kept and every check passed
- *   review     a file is kept, at least one check warned
- *   waiting    no file yet because a source was down or out of credits; retried after nextTry
- *   not_found  no source had an acceptable file; retried after nextTry, with growing gaps
- *   closed     set by the user; never retried
- *
- * work.json: id, input, query, status, kind, added, updated, meta, file, checks,
- * candidates, lookups, attempts (every download ever tried), rejectedMd5s,
- * tries (not_found runs in a row), nextTry, lastRunMs, error.
+ * work.json fields: id, input, query, status (STATUSES; meanings in the README),
+ * kind, added, updated, meta, file, checks, candidates, lookups, attempts (every
+ * download ever tried), rejectedMd5s, tries (not_found runs in a row), waits
+ * (outage runs in a row), nextTry, lastRunMs, error.
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { config } from "./config.js";
-import { parseInput, workId } from "./ids.js";
+import { ID_KINDS, normaliseId, parseInput, workId } from "./ids.js";
 
 export const STATUSES = ["queued", "done", "review", "waiting", "not_found", "closed"];
 
@@ -66,6 +61,35 @@ export function assertLibrary() {
   if (problem) throw new Error(problem);
 }
 
+/**
+ * Take the library lock for a command that changes existing works. Returns a
+ * release function. A lock left by a process that no longer runs is taken over.
+ */
+export async function lock() {
+  const path = join(config.library, ".lock");
+  await mkdir(config.library, { recursive: true });
+  for (;;) {
+    try {
+      await writeFile(path, String(process.pid), { flag: "wx" });
+      return () => rm(path, { force: true });
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      const pid = Number(await readFile(path, "utf8").catch(() => ""));
+      if (pid && pid !== process.pid && isAlive(pid)) throw new Error(`another litfetch command (pid ${pid}) is changing the library`);
+      await rm(path, { force: true });
+    }
+  }
+}
+
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
 async function readJson(path) {
   try {
     return JSON.parse(await readFile(path, "utf8"));
@@ -75,11 +99,12 @@ async function readJson(path) {
   }
 }
 
-/** Write atomically (temp file + rename) so a crash never leaves half a file. */
+/** Write atomically (own temp file, then rename) so a crash never leaves half a file. */
 async function writeJson(path, data) {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(`${path}.tmp`, JSON.stringify(data, null, 2) + "\n");
-  await rename(`${path}.tmp`, path);
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  await writeFile(tmp, JSON.stringify(data, null, 2) + "\n");
+  await rename(tmp, path);
 }
 
 export const load = (id) => readJson(join(workDir(id), "work.json"));
@@ -101,27 +126,47 @@ export async function retire(work) {
   await rename(filePath(work), join(dir, `${stamp}-${work.file.name}`));
 }
 
-export async function list() {
-  let ids;
+/** All readable records, plus the folders in works/ whose record is missing or unreadable. */
+export async function scan() {
+  let entries;
   try {
-    ids = await readdir(worksDir());
+    entries = await readdir(worksDir(), { withFileTypes: true });
   } catch (err) {
-    if (err.code === "ENOENT") return [];
+    if (err.code === "ENOENT") return { works: [], broken: [] };
     throw err;
   }
-  const works = await Promise.all(ids.map(load));
-  return works.filter(Boolean).sort((a, b) => a.id.localeCompare(b.id));
+  const works = [];
+  const broken = [];
+  for (const entry of entries.filter((e) => e.isDirectory())) {
+    const work = await load(entry.name).catch(() => null);
+    if (work) works.push(work);
+    else broken.push(entry.name);
+  }
+  return { works: works.sort((a, b) => a.id.localeCompare(b.id)), broken };
 }
+
+export const list = async () => (await scan()).works;
+
+/** The identifier a query is filed under, normalised, e.g. "doi 10.1/x". */
+const identity = (query) => {
+  const kind = ID_KINDS.find((k) => query[k]);
+  return kind ? `${kind} ${normaliseId(kind, query[kind])}` : `title ${query.title}`;
+};
 
 /**
  * Queue one input line. `hints` carry metadata known up front (title, authors,
  * year, type, language), e.g. from an imported reference list or the web UI.
- * An existing work is left untouched.
+ * An existing work for the same identifier is left untouched. Two identifiers
+ * whose folder names would collide get a hash suffix.
  */
 export async function add(input, hints = {}) {
   const query = { ...hints, ...parseInput(input) };
-  const id = workId(query);
-  const existing = await load(id);
+  let id = workId(query);
+  let existing = await load(id);
+  if (existing && identity(existing.query) !== identity(query)) {
+    id = `${id}-${createHash("sha1").update(identity(query)).digest("hex").slice(0, 8)}`;
+    existing = await load(id);
+  }
   if (existing) return { work: existing, created: false };
   const now = new Date().toISOString();
   const work = {
@@ -140,6 +185,7 @@ export async function add(input, hints = {}) {
     attempts: [],
     rejectedMd5s: [],
     tries: 0,
+    waits: 0,
     nextTry: null,
     lastRunMs: null,
     error: null,
@@ -163,7 +209,11 @@ const INDEX_COLUMNS = [
   ["error", (w) => w.error ?? ""],
 ];
 
-const csvCell = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+/** A CSV cell; text that a spreadsheet would run as a formula is prefixed with '. */
+function csvCell(value) {
+  const v = String(value).replace(/^[=+\-@]/, "'$&");
+  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+}
 
 export async function writeIndex() {
   const works = await list();

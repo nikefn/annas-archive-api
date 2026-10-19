@@ -4,7 +4,9 @@
  * LITFETCH_LLM_MODELS lists models and ANTHROPIC_API_KEY is set, and then only
  * for files whose identity check warned. The opening pages of such a file are
  * sent to the Anthropic API. Models are tried in the listed order, cheapest
- * first; an "unsure" answer or a refusal escalates to the next.
+ * first; an "unsure" answer, a refusal or a cut-off answer escalates to the next.
+ * The document text is marked as untrusted, but a document could still be
+ * written to sway the answer, which is why triage only runs on warnings.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -45,12 +47,12 @@ export async function confirmIdentity(meta, openingText) {
   for (const model of config.llmModels) {
     const resp = await client.messages.create({
       model,
-      max_tokens: 2048,
+      max_tokens: 4096,
       output_config: { effort: "low", format: { type: "json_schema", schema: SCHEMA } },
       messages: [{ role: "user", content: prompt }],
     });
     const text = resp.content.find((b) => b.type === "text")?.text;
-    if (resp.stop_reason === "refusal" || !text) continue;
+    if (resp.stop_reason !== "end_turn" || !text) continue;
     last = { ...JSON.parse(text), model };
     if (last.verdict !== "unsure") return last;
   }

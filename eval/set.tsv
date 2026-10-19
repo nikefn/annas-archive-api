@@ -1,27 +1,29 @@
 input	kind	language	gold
-10.1371/journal.pmed.0020124	article	en	
-10.7717/peerj.4375	article	en	
-10.1103/PhysRevLett.116.061102	article	en	
-10.1038/nature12373	article	en	
-arXiv:1706.03762	article	en	
-arXiv:1512.03385	article	en	
-10.1038/nature14539	article	en	
-10.1126/science.1225829	article	en	
-10.1056/NEJMoa2034577	article	en	
-10.1145/3065386	article	en	
-isbn:9780262033848	book	en	
-isbn:9780131103627	book	en	
-isbn:9780201633610	book	en	
-isbn:9780262510875	book	en	
-Being and Time	book	en	
-The History of Sexuality, Vol. 1: An Introduction	book	en	
-The History of Sexuality, Vol. 2: The Use of Pleasure	book	en	
-Surveiller et punir	book	fr	
-Les Misérables	book	fr	
-Die Verwandlung	book	de	
-Der Process	book	de	
-symbol: A/RES/70/1	report	en	
-celex: 32016R0679	report	en	
-celex: 32019L0790	report	en	
-World Development Report 2021: Data for Better Lives	report	en	
-Global Tuberculosis Report 2023	report	en	
+10.1371/journal.pmed.0020124	article	en
+10.7717/peerj.4375	article	en
+10.1103/PhysRevLett.116.061102	article	en
+10.1038/nature12373	article	en
+arXiv:1706.03762	article	en
+arXiv:1512.03385	article	en
+10.1038/nature14539	article	en
+10.1126/science.1225829	article	en
+10.1056/NEJMoa2034577	article	en
+10.1145/3065386	article	en
+isbn:9780387848570	book	en
+isbn:9781461471370	book	en
+Moby-Dick; or, The Whale	book	en
+Pride and Prejudice	book	en
+The History of the Decline and Fall of the Roman Empire, Vol. 1	book	en
+The History of the Decline and Fall of the Roman Empire, Vol. 2	book	en
+Les Misérables	book	fr
+Du contrat social	book	fr
+Die Verwandlung	book	de
+Der Process	book	de
+Also sprach Zarathustra	book	de
+Das Kapital, Band 1	book	de
+Das Kapital, Band 2	book	de
+symbol: A/RES/70/1	report	en
+celex: 32016R0679	report	en
+celex: 32019L0790	report	en
+World Development Report 2021: Data for Better Lives	report	en
+Global Tuberculosis Report 2023	report	en

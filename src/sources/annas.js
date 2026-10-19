@@ -1,21 +1,20 @@
 /**
  * Anna's Archive: shadow-library search engine for books, papers and magazines.
- * Opt-in source; needs a member account secret key (ANNAS_KEY).
+ * Opt-in source; needs a member account key (ANNAS_KEY).
  *
  * What costs what:
  *   free    search, the file record (/db/...json, with name, size, content type,
  *           IPFS ids), SciDB pages for DOIs, IPFS gateways
  *   credit  a fast-download link (/dyn/api/fast_download.json); the daily quota
  *           is tracked in <library>/_state/annas.json
- * Free routes are tried first. Credited links are capped per work and pass
+ * Free routes are tried first. Credited links are capped per work and run
  * (ANNAS_MAX_PER_WORK), and none is requested while the quota is used up.
  *
- * Searches and records need a signed-in session: Anna's Archive sends anonymous
- * /search and /md5/ requests through a DDoS-Guard check that fetch cannot pass.
- * The key is traded for a session cookie via POST /account/, and only that
- * cookie is cached, in memory, under a hash of the key. An expired session gets
- * a redirect loop with check=1, which http.js reports as a bot check; one fresh
- * login is tried before giving up.
+ * Searches and records need a signed-in session, because Anna's Archive sends
+ * anonymous /search requests through a bot check. The key is exchanged for a
+ * session cookie (POST /account/); only the cookie is kept, in memory, under a
+ * hash of the key, and it is only ever sent to the mirror it came from. An
+ * expired session gets a bot check; one fresh login is tried before giving up.
  *
  * The web UI in server/ uses search() and fastDownload() with a per-request key.
  */
@@ -28,20 +27,15 @@ import { config } from "../config.js";
 import { HttpError, client, hostOf, isOutage, mirrorSet } from "../http.js";
 import * as store from "../store.js";
 
-const HEADERS = { "Accept-Language": "en-US,en;q=0.9" };
-const http = client({ headers: HEADERS });
+const http = client({ headers: { "Accept-Language": "en-US,en;q=0.9" } });
 export const mirrors = mirrorSet(config.annasMirrors.map((m) => m.replace(/\/$/, "")));
 
-const DOWNLOAD_COUNT_CONCURRENCY = 10; // inline_info lookups in flight; a politeness cap
-const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
-const MAX_REDIRECTS = 5;
+const COUNT_LOOKUPS_IN_FLIGHT = 10;
+const SESSION_TTL_MS = 6 * 3_600_000;
+const REDIRECT_LIMIT = 5;
 const GATEWAYS_PER_FILE = 3;
-const HOUR = 3_600_000;
 
-/** sha256(key + mirror) -> { cookie, at }. In memory only, never persisted. */
-const sessions = new Map();
-
-/** Raised when the upstream site answers but not with what was asked for. */
+/** Raised when the site answers, but not with what was asked for. */
 export class AnnasArchiveError extends Error {
   constructor(message, status) {
     super(message);
@@ -54,136 +48,66 @@ export class AnnasArchiveError extends Error {
 export function mirrorFor(tld) {
   const want = String(tld).trim().replace(/^\.+/, "").toLowerCase();
   const base = mirrors.ordered().find((m) => hostOf(m).endsWith(`.${want}`));
-  if (!want || !base) throw new AnnasArchiveError(`unknown mirror "${tld}"; allowed: ${mirrors.ordered().map(hostOf).join(", ")}`, 400);
+  if (!want || !base) {
+    throw new AnnasArchiveError(`unknown mirror "${tld}"; allowed: ${mirrors.ordered().map(hostOf).join(", ")}`, 400);
+  }
   return base;
 }
 
-function clean(text) {
-  return text.replace(/\s+/g, " ").trim();
+const squash = (text) => text.replace(/\s+/g, " ").trim();
+const UNITS = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 };
+
+/** "0.4MB" -> bytes, else undefined. */
+function sizeOf(field) {
+  const m = field.match(/^(\d+(?:\.\d+)?)\s?([KMG])B$/i);
+  return m ? Math.round(Number(m[1]) * UNITS[m[2].toUpperCase()]) : undefined;
 }
 
 /**
- * Pull the file format out of the metadata line, e.g.
- *   "English [en] · EPUB · 0.4MB · 2014 · 📕 Book (fiction) · 🚀/lgli/..."
- * Format is the short token before the file size (epub, pdf, azw3, fb2, ...). We
- * scan segments rather than hard-coding an index so an extra leading field
- * doesn't break it.
- *
- * Digits are allowed after the first character so alphanumeric extensions
- * (fb2, azw3, mp3) are recognised, but the token must start with a letter,
- * which keeps the year ("2014") and the size ("0.4MB") from matching.
+ * Results of a search page. Each result card holds a title link to /md5/<md5>
+ * and a line "English [en] · EPUB · 0.4MB · 2014 · Book (fiction) · sources",
+ * from which format, size and content type are read. The md5 must be 32 hex
+ * characters because the UI puts it into its markup.
  */
-function extractFormat(metaText) {
-  for (const seg of metaText.split("·").map((s) => s.trim())) {
-    const token = seg.toLowerCase();
-    const stripped = token.replace(/-/g, "");
-    // Short tokens only; skip language-ish "[xx]" segments.
-    if (stripped && /^\p{L}[\p{L}\d]*$/u.test(stripped) && token.length <= 6) {
-      if (seg.includes("[")) continue;
-      return token;
-    }
-  }
-  return null;
-}
-
-/** Fallback: locate the metadata line by its emoji/middot signature. */
-function findMetaDiv($, card) {
-  let found = null;
-  card.find("div").each((_, el) => {
-    if (found) return;
-    const div = $(el);
-    const text = div.text();
-    const hasSignature =
-      text.includes("📕") ||
-      text.includes("📘") ||
-      text.includes("📗") ||
-      text.includes("MB") ||
-      text.includes("KB");
-    if (text.includes("·") && hasSignature && div.find("div").length === 0) {
-      // Prefer the most specific (deepest) matching div.
-      found = div;
-    }
-  });
-  return found;
-}
-
-/** Extract all search results from a search page's HTML. */
 export function parseSearchResults(html, baseUrl = config.annasMirrors[0]) {
   const $ = load(html);
   const base = baseUrl.replace(/\/$/, "");
+  const seen = new Set();
   const results = [];
-
-  // Each result's title is an anchor carrying the `js-vim-focus` class and
-  // pointing at /md5/<hash>, the most stable anchor on the card.
   $("a.js-vim-focus[href^='/md5/']").each((_, el) => {
-    const titleLink = $(el);
-    const href = titleLink.attr("href") || "";
-    const md5 = href.split("/").pop();
-    // Drop anything that isn't a real 32-hex md5: the value is mirror-controlled
-    // and flows into a JS-string sink in the frontend download button.
-    if (!/^[a-f0-9]{32}$/.test(md5)) return;
-    const title = clean(titleLink.text());
-
-    // Walk up to the result card so author/meta lookups stay scoped to it.
-    let card = titleLink;
-    for (let i = 0; i < 6; i++) {
-      const parent = card.parent();
-      if (parent.length === 0) break;
-      card = parent;
-      if (card.hasClass("flex") && card.hasClass("pt-3")) break;
-    }
-
-    // Author: the anchor whose icon is `mdi--user-edit`.
-    let author = "";
-    const authorIcon = card.find("span[class*='icon-[mdi--user-edit]']").first();
-    if (authorIcon.length) {
-      const authorLink = authorIcon.closest("a");
-      if (authorLink.length) author = clean(authorLink.text());
-    }
-
-    // Cover image inside the cover thumbnail div (some results have none).
-    let coverUrl = null;
-    const coverImg = card
-      .find("div[id^='list_cover_aarecord_id__'] img")
-      .first();
-    if (coverImg.length) {
-      const src = coverImg.attr("src");
-      if (src) {
-        coverUrl = src.startsWith("http")
-          ? src
-          : `${base}/${src.replace(/^\//, "")}`;
-      }
-    }
-
-    // Metadata line (language · FORMAT · size · year · type · sources).
-    let metaDiv = card
-      .find("div.font-semibold.text-sm")
-      .filter((__, d) => ($(d).attr("class") || "").includes("leading-[1.2]"))
-      .first();
-    if (!metaDiv.length) metaDiv = findMetaDiv($, card);
-    const format = metaDiv && metaDiv.length ? extractFormat(metaDiv.text()) : null;
-
+    const link = $(el);
+    const md5 = link.attr("href").slice("/md5/".length);
+    if (!/^[a-f0-9]{32}$/.test(md5) || seen.has(md5)) return;
+    seen.add(md5);
+    const card = link.closest("div.flex.pt-3").length ? link.closest("div.flex.pt-3") : link.parent();
+    const metaLine = card
+      .find("div")
+      .filter((__, d) => $(d).children("div").length === 0 && /·/.test($(d).text()) && /\d\s?[KMG]B\b/i.test($(d).text()))
+      .last();
+    const fields = squash(metaLine.text()).split("·").map((f) => f.trim());
+    const type = fields.find((f) => /\b(book|article|magazine|comic|standard|score)\b/i.test(f));
+    const cover = card.find("img").first().attr("src");
     results.push({
-      title,
-      author,
-      format,
+      title: squash(link.text()),
+      author: squash(card.find("a:has(span[class*='user-edit'])").first().text()),
+      format: fields.find((f) => /^[A-Z][A-Z0-9]{1,5}$/.test(f))?.toLowerCase() ?? null,
+      size: fields.map(sizeOf).find(Boolean) ?? null,
+      content_type: type ? type.replace(/^[^\p{L}]+/u, "").toLowerCase().replace(/\W+/g, "_").replace(/_+$/, "") : null,
+      name: squash(card.find("div.font-mono").first().text()) || null,
       downloads: null,
-      cover_url: coverUrl,
+      cover_url: cover ? new URL(cover, `${base}/`).toString() : null,
       url: `${base}/md5/${md5}`,
       md5,
     });
   });
-
   return results;
 }
 
-const sessionId = (key, baseUrl) => createHash("sha256").update(`${key}\n${baseUrl}`).digest("hex");
+/** In-memory sessions, keyed by a hash of key and mirror: { cookie, since }. */
+const sessions = new Map();
+const sessionKey = (key, baseUrl) => createHash("sha256").update(`${key}\n${baseUrl}`).digest("hex");
 
-/**
- * Exchange the account secret key for a session cookie. Anna's Archive takes a
- * single form field (`key`) on POST /account/ and replies with an
- * `aa_account_id2` cookie; anything starting `aa_` is session state.
- */
+/** Exchange the key for the site's session cookies (those named aa_*). */
 async function login(baseUrl, key) {
   const resp = await http.request(`${baseUrl}/account/`, {
     method: "POST",
@@ -192,30 +116,32 @@ async function login(baseUrl, key) {
     redirect: "manual",
   });
   await resp.body?.cancel();
-  const cookie = resp.headers
-    .getSetCookie()
-    .map((c) => c.split(";")[0].trim())
-    .filter((c) => c.startsWith("aa_") && c.includes("="))
-    .join("; ");
-  // A bad key still returns 200 with the login form, just no session cookie.
-  if (!cookie) throw new AnnasArchiveError("Anna's Archive rejected the key; check it in Settings.", 401);
-  return cookie;
+  const pairs = [];
+  for (const header of resp.headers.getSetCookie()) {
+    const [pair] = header.split(";");
+    if (/^aa_[^=]*=/.test(pair.trim())) pairs.push(pair.trim());
+  }
+  // A wrong key gets the login form again, without a cookie.
+  if (!pairs.length) throw new AnnasArchiveError("Anna's Archive rejected the key; check it in Settings.", 401);
+  return pairs.join("; ");
 }
 
 async function session(baseUrl, key, fresh = false) {
-  const id = sessionId(key, baseUrl);
-  const hit = sessions.get(id);
-  if (!fresh && hit && Date.now() - hit.at < SESSION_TTL_MS) return hit.cookie;
-  const cookie = await login(baseUrl, key);
-  sessions.set(id, { cookie, at: Date.now() });
-  return cookie;
+  const slot = sessionKey(key, baseUrl);
+  const known = sessions.get(slot);
+  if (known && !fresh && Date.now() - known.since < SESSION_TTL_MS) return known.cookie;
+  const entry = { cookie: await login(baseUrl, key), since: Date.now() };
+  sessions.set(slot, entry);
+  return entry.cookie;
 }
 
-/** GET following redirects by hand, so a check=1 hop is reported, not looped on. */
-async function getFollowing(url, headers) {
+/** GET following redirects one by one; the cookie is dropped as soon as a hop leaves the mirror. */
+async function getFollowing(url, cookie) {
   let current = new URL(url);
-  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const resp = await http.request(current, { headers, redirect: "manual" });
+  const origin = current.origin;
+  for (let hop = 0; hop <= REDIRECT_LIMIT; hop++) {
+    const headers = cookie && current.origin === origin ? { Cookie: cookie } : {};
+    const resp = await http.request(current, { headers, redirect: "manual", totalMs: config.timeoutMs });
     const loc = resp.headers.get("location");
     if (resp.status < 300 || resp.status >= 400 || !loc) return { resp, url: current };
     await resp.body?.cancel();
@@ -224,19 +150,18 @@ async function getFollowing(url, headers) {
   throw new AnnasArchiveError("too many redirects from Anna's Archive", 502);
 }
 
-/** A signed-in GET (anonymous without a key). A bot check gets one fresh login. */
+/** A signed-in GET (anonymous without a key); a bot check gets one fresh login. */
 async function signedIn(baseUrl, path, key) {
   for (const fresh of [false, true]) {
-    const headers = key ? { Cookie: await session(baseUrl, key, fresh) } : {};
     try {
-      return await getFollowing(`${baseUrl}${path}`, headers);
+      return await getFollowing(`${baseUrl}${path}`, key && (await session(baseUrl, key, fresh)));
     } catch (err) {
       if (err.code !== "CHALLENGE" || !key || fresh) throw err;
     }
   }
 }
 
-async function text(baseUrl, path, key) {
+async function page(baseUrl, path, key) {
   const { resp, url } = await signedIn(baseUrl, path, key);
   if (!resp.ok) {
     await resp.body?.cancel();
@@ -245,35 +170,25 @@ async function text(baseUrl, path, key) {
   return { body: await resp.text(), url };
 }
 
-/** Fill result.downloads from inline_info; a failed lookup leaves null. */
-async function fetchDownloads(result, baseUrl) {
-  try {
-    const data = await http.json(`${baseUrl}/dyn/md5/inline_info/${result.md5}`, { headers: { Accept: "text/css" } });
-    const n = parseInt(data.downloads_total, 10);
-    result.downloads = Number.isNaN(n) ? null : n;
-  } catch {
-    result.downloads = null;
-  }
+/** Download counts come from a separate endpoint; a failed lookup leaves null. */
+async function addDownloadCounts(results, baseUrl) {
+  const queue = results.slice();
+  const worker = async () => {
+    for (let r = queue.shift(); r; r = queue.shift()) {
+      const data = await http.json(`${baseUrl}/dyn/md5/inline_info/${r.md5}`).catch(() => null);
+      const n = parseInt(data?.downloads_total, 10);
+      r.downloads = Number.isNaN(n) ? null : n;
+    }
+  };
+  await Promise.all(Array.from({ length: COUNT_LOOKUPS_IN_FLIGHT }, worker));
 }
 
-async function withConcurrency(items, limit, worker) {
-  const queue = items.slice();
-  await Promise.all(
-    Array.from({ length: Math.min(limit, queue.length) }, async () => {
-      while (queue.length) await worker(queue.shift());
-    })
-  );
-}
-
-/**
- * Search and return up to `limit` results, with download counts unless
- * `includeDownloads` is false. Without `baseUrl` the mirrors are rotated.
- */
+/** Up to `limit` results, with download counts unless `includeDownloads` is false. Without `baseUrl` the mirrors rotate. */
 export async function search(query, { limit = 20, includeDownloads = true, key, baseUrl } = {}) {
   const once = async (base) => {
-    const { body } = await text(base, `/search?${new URLSearchParams({ q: query })}`, key);
+    const { body } = await page(base, `/search?${new URLSearchParams({ q: query })}`, key);
     const results = parseSearchResults(body, base).slice(0, limit);
-    if (includeDownloads) await withConcurrency(results, DOWNLOAD_COUNT_CONCURRENCY, (r) => fetchDownloads(r, base));
+    if (includeDownloads) await addDownloadCounts(results, base);
     return results;
   };
   return baseUrl ? once(baseUrl) : mirrors.run(once);
@@ -285,7 +200,9 @@ export async function search(query, { limit = 20, includeDownloads = true, key, 
  */
 export async function fastDownload(md5, key, { baseUrl } = {}) {
   const once = async (base) => {
-    const resp = await http.request(`${base}/dyn/api/fast_download.json?${new URLSearchParams({ md5, key })}`);
+    const resp = await http.request(`${base}/dyn/api/fast_download.json?${new URLSearchParams({ md5, key })}`, {
+      totalMs: config.timeoutMs,
+    });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new AnnasArchiveError(data.error || `HTTP ${resp.status}`, resp.status);
     return data;
@@ -305,7 +222,7 @@ export function recordInfo(record) {
   };
 }
 
-/** The PDF a SciDB page shows (its viewer's file= or the download link), or null. */
+/** The PDF a SciDB page shows (its viewer's file= or a PDF link), or null. */
 export function parseScidbPage(html, pageUrl) {
   const $ = load(html);
   const viewer = $("iframe[src*='viewer.html'], a[href*='viewer.html']").first();
@@ -314,12 +231,12 @@ export function parseScidbPage(html, pageUrl) {
   return file ? new URL(file, pageUrl).toString() : null;
 }
 
-const records = new Map();
+const records = new Map(); // md5 -> recordInfo
 
 async function record(md5) {
   if (!records.has(md5)) {
     const info = await mirrors.run(async (base) => {
-      const { body } = await text(base, `/db/aarecord_elasticsearch/md5:${md5}.json`, config.keys.annas);
+      const { body } = await page(base, `/db/aarecord_elasticsearch/md5:${md5}.json`, config.keys.annas);
       return recordInfo(JSON.parse(body));
     });
     records.set(md5, info);
@@ -338,7 +255,7 @@ const credits = {
     }
   },
   async note(left) {
-    const refillAt = left > 0 ? null : new Date(Date.now() + config.annasWindowHours * HOUR).toISOString();
+    const refillAt = left > 0 ? null : new Date(Date.now() + config.annasWindowHours * 3_600_000).toISOString();
     await store.writeState("annas", { left, refillAt, updated: new Date().toISOString() });
   },
 };
@@ -373,7 +290,16 @@ export default {
     const results = await search(term, { limit: 10, includeDownloads: false, key: config.keys.annas });
     const found = results.map((r) => ({
       meta: { title: r.title, authors: r.author ? [r.author] : [], md5: r.md5 },
-      files: [{ md5: r.md5, format: r.format, credit: true }],
+      files: [
+        {
+          md5: r.md5,
+          format: r.format ?? undefined,
+          size: r.size ?? undefined,
+          name: r.name ?? undefined,
+          contentType: r.content_type ?? undefined,
+          credit: true,
+        },
+      ],
     }));
     return q.doi ? [{ meta: { doi: q.doi }, files: [{ scidb: q.doi }] }, ...found] : found;
   },
@@ -385,32 +311,34 @@ export default {
     return record(file.md5);
   },
 
-  async *links(file, { work, pass, allowCredit = true }) {
+  async *links(file, { work, shared, allowCredit = true }) {
     const key = config.keys.annas;
     if (file.scidb) {
       const url = await mirrors.run(async (base) => {
-        const page = await text(base, `/scidb/${file.scidb}`, key);
-        return new URL(page.url).pathname.startsWith("/scidb/") ? parseScidbPage(page.body, page.url.toString()) : null;
+        const scidb = await page(base, `/scidb/${file.scidb}`, key);
+        return scidb.url.pathname.startsWith("/scidb/") ? parseScidbPage(scidb.body, scidb.url.toString()) : null;
       });
       if (url) yield { url };
       return;
     }
     await credits.check();
     // Without a readable record there are no gateway routes, but the credited link still works.
-    const info = file.ipfs ? file : await record(file.md5).catch((err) => {
-      if (isOutage(err)) throw err;
-      return { ipfs: [] };
-    });
-    const failures = (g) => pass.failures.get(hostOf(g)) ?? 0;
+    const info = file.ipfs
+      ? file
+      : await record(file.md5).catch((err) => {
+          if (isOutage(err)) throw err;
+          return { ipfs: [] };
+        });
+    const failures = (g) => shared.failures.get(hostOf(g)) ?? 0;
     const gateways = [...config.ipfsGateways].sort((a, b) => failures(a) - failures(b)).slice(0, GATEWAYS_PER_FILE);
     for (const cid of info.ipfs.slice(0, 1)) {
       for (const gateway of gateways) yield { url: `${gateway.replace(/\/$/, "")}/ipfs/${cid}`, md5: file.md5 };
     }
     if (!allowCredit) return;
-    const spent = pass.spent.get(work.id) ?? 0;
+    const spent = shared.spent.get(work.id) ?? 0;
     if (spent >= config.annasMaxPerWork) return;
     await credits.check();
-    pass.spent.set(work.id, spent + 1);
+    shared.spent.set(work.id, spent + 1);
     yield { url: await creditedLink(file.md5), md5: file.md5, credit: true };
   },
 };

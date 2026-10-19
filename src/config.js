@@ -1,10 +1,11 @@
 /**
  * Every setting litfetch reads, in one place. Values come from the environment
- * and from `.env` in the working directory. Nothing else reads process.env.
+ * and from `.env` in the working directory. No other module of litfetch reads
+ * process.env (the optional Anthropic SDK reads its own ANTHROPIC_* variables).
  */
 
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 try {
   process.loadEnvFile();
@@ -13,13 +14,20 @@ try {
 }
 
 const env = (name, fallback = "") => (process.env[name] ?? "").trim() || fallback;
-const num = (name, fallback) => (env(name) === "" ? fallback : Number(env(name)));
 const list = (name, fallback = "") =>
   env(name, fallback).split(",").map((s) => s.trim()).filter(Boolean);
 
+/** A non-negative number, or the fallback when unset. A typo stops the program. */
+function num(name, fallback, value = env(name)) {
+  if (value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) throw new Error(`${name} must be a number, got "${value}"`);
+  return n;
+}
+
 /** Open sources, tried in this order. Rate-limited and shadow-library sources are opt-in. */
 const DEFAULT_SOURCES =
-  "web,crossref,openalex,unpaywall,arxiv,europepmc,semanticscholar,core,hal,zenodo,worldbank,dspace,unods,cellar";
+  "web,crossref,openalex,unpaywall,openlibrary,arxiv,europepmc,semanticscholar,core,hal,zenodo,worldbank,dspace,unods,cellar";
 
 const email = env("LITFETCH_EMAIL");
 const coreKey = env("CORE_API_KEY");
@@ -32,7 +40,7 @@ const coreKey = env("CORE_API_KEY");
 const PACE = [
   ...list("LITFETCH_PACE").map((entry) => {
     const [host, ms] = entry.split("=");
-    return [host.trim(), Number(ms)];
+    return [host.trim(), num("LITFETCH_PACE", undefined, (ms ?? "x").trim())];
   }),
   ["arxiv.org", 3000],
   ["libgen.", 2000],
@@ -46,19 +54,18 @@ const PACE = [
   ["api.unpaywall.org", 100],
   ["ebi.ac.uk", 200],
   ["archives-ouvertes.fr", 500],
-  ["worldbank.org", 500],
+  ["search.worldbank.org", 500],
 ];
 const DEFAULT_PACE_MS = 1000;
 
 export const config = {
-  library: resolve(env("LITFETCH_LIBRARY", join(homedir(), "litfetch-library"))),
+  library: resolve(env("LITFETCH_LIBRARY", "~/litfetch-library").replace(/^~(?=$|[/\\])/, homedir())),
   email,
   sources: list("LITFETCH_SOURCES", DEFAULT_SOURCES),
-  concurrency: num("LITFETCH_CONCURRENCY", 4),
-  maxAttempts: num("LITFETCH_MAX_ATTEMPTS", 5),
+  concurrency: Math.max(1, num("LITFETCH_CONCURRENCY", 4)),
+  maxAttempts: Math.max(1, num("LITFETCH_MAX_ATTEMPTS", 5)),
   maxBytes: num("LITFETCH_MAX_MB", 600) * 1024 * 1024,
   timeoutMs: num("LITFETCH_TIMEOUT_S", 30) * 1000,
-  outageRetryHours: num("LITFETCH_OUTAGE_RETRY_H", 6),
   llmModels: list("LITFETCH_LLM_MODELS"),
 
   paceOf: (host) => PACE.find(([part]) => host.includes(part))?.[1] ?? DEFAULT_PACE_MS,

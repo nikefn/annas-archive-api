@@ -24,7 +24,8 @@ async function sha256(path) {
  *   - the library is not inside a git checkout (or is git-ignored)
  *   - every kept file exists and still has its recorded sha256
  *   - no record contains a key, a credited download URL or session data
- * Returns { errors, notes }; notes list works that share a file (each is in review).
+ * Returns { errors, notes }. Notes list works that share a file (usually the
+ * same work queued twice; close one) and folders without a readable record.
  */
 export async function verify() {
   const errors = [];
@@ -32,7 +33,8 @@ export async function verify() {
   const problem = store.libraryProblem();
   if (problem) errors.push(problem);
 
-  const works = await store.list();
+  const { works, broken } = await store.scan();
+  for (const id of broken) notes.push(`works/${id} has no readable work.json`);
   const secrets = Object.values(config.keys).filter((k) => k.length >= 8);
   const holders = new Map();
   for (const w of works) {

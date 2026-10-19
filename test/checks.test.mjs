@@ -1,20 +1,20 @@
-import "./env.mjs";
+import { scratch } from "./env.mjs";
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { checkFile } from "../src/checks/index.js";
+import { workChecks } from "../src/checks/rules.js";
 import { detectFormat } from "../src/checks/file.js";
 import { makeEpub, makePdf, prose } from "./helpers.mjs";
 
-const dir = mkdtempSync(join(tmpdir(), "litfetch-checks-"));
+const dir = scratch("checks");
 const META = { title: "Glacier Retreat in the Alps", authors: ["Muster, Erika"], year: 2021, pages: 2 };
 
-async function check(name, bytes, { meta = META, expected = {}, candidates, kind = "article", language } = {}) {
+async function check(name, bytes, { meta = META, expected = {}, kind = "article", language } = {}) {
   const path = join(dir, name);
   writeFileSync(path, bytes);
   const file = {
@@ -28,7 +28,6 @@ async function check(name, bytes, { meta = META, expected = {}, candidates, kind
     meta,
     kind,
     language,
-    candidates: candidates ?? [{ source: "crossref", tier: "same", meta }],
     duplicates: new Map(),
   });
   result.byName = Object.fromEntries(result.checks.map((c) => [c.name, c.status]));
@@ -121,16 +120,16 @@ test("a text in another language than the work wants fails", async () => {
   assert.equal((await check("en.pdf", en, { language: "en" })).byName.language, "pass");
 });
 
-test("disagreeing sources and missing fields put a work into review", async () => {
+test("work checks: missing fields and disagreeing sources warn, whatever the file", () => {
   const meta = { title: META.title, authors: [] };
   const candidates = [
     { source: "crossref", tier: "same", meta },
     { source: "openalex", tier: "same", meta: { title: "An unrelated book about cooking" } },
   ];
-  const r = await check("meta.pdf", goodPdf, { meta, candidates });
-  assert.equal(r.byName["metadata-complete"], "warn");
-  assert.equal(r.byName["metadata-agreement"], "warn");
-  assert.equal(r.verdict, "warn");
+  const byName = Object.fromEntries(workChecks({ meta, candidates }).map((c) => [c.name, c]));
+  assert.equal(byName["metadata-complete"].status, "warn");
+  assert.equal(byName["metadata-agreement"].status, "warn");
+  assert.ok(Object.values(byName).every((c) => c.scope === "work"));
 });
 
 test("EPUB metadata and text are read", async () => {

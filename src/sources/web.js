@@ -5,12 +5,13 @@
  * publishers the PDF URL also follows from the DOI itself.
  *
  * Nothing here signs in or gets past a bot check: a refused or challenged page
- * simply yields no file.
+ * yields no file. A server that is down is an outage like for any source.
  */
 
 import { load } from "cheerio";
 
-import { client } from "../http.js";
+import { config } from "../config.js";
+import { HttpError, client, isOutage } from "../http.js";
 import { bareDoi, yearOf } from "./meta.js";
 
 const http = client();
@@ -46,12 +47,13 @@ export function parseLandingPage(html, pageUrl) {
   };
 }
 
-/** The page at `url`: { html: false } for a non-HTML response, null when refused or unreachable. */
+/** The page at `url`: { html: false } for a non-HTML response, null when refused or challenged. */
 async function fetchPage(url) {
   try {
-    const resp = await http.request(url, { redirect: "follow" });
+    const resp = await http.request(url, { redirect: "follow", totalMs: config.timeoutMs });
     if (!resp.ok) {
       await resp.body?.cancel();
+      if (resp.status === 429 || resp.status >= 500) throw new HttpError(`HTTP ${resp.status}`, resp.status);
       return null;
     }
     if (!(resp.headers.get("content-type") || "").includes("html")) {
@@ -59,7 +61,8 @@ async function fetchPage(url) {
       return { html: false };
     }
     return { html: true, ...parseLandingPage(await resp.text(), resp.url) };
-  } catch {
+  } catch (err) {
+    if (isOutage(err) && err.code !== "CHALLENGE") throw err;
     return null;
   }
 }

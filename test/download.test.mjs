@@ -1,16 +1,17 @@
-import "./env.mjs";
+import { scratch } from "./env.mjs";
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import { gzipSync } from "node:zlib";
 
 import { config } from "../src/config.js";
 import { LIMITS, download } from "../src/download.js";
 
-const dir = mkdtempSync(join(tmpdir(), "litfetch-dl-"));
+const dir = scratch("downloads");
+const GZIPPED = gzipSync(Buffer.alloc(200_000, 7));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Each route streams `chunks` chunks of `size` bytes, `gap` ms apart, then waits `hang` ms. */
@@ -25,6 +26,11 @@ let server;
 let base;
 before(async () => {
   server = createServer(async (req, res) => {
+    if (req.url === "/gzip") {
+      res.writeHead(200, { "Content-Type": "application/pdf", "Content-Encoding": "gzip", "Content-Length": GZIPPED.length });
+      res.end(GZIPPED);
+      return;
+    }
     const r = ROUTES[req.url];
     res.writeHead(200, { "Content-Type": "application/pdf", ...(r.declared ? { "Content-Length": r.declared } : {}) });
     for (let i = 0; i < r.chunks && !res.destroyed; i++) {
@@ -69,4 +75,9 @@ test("a trickle below the minimum rate fails as too slow", async () => {
 
 test("a body shorter than its Content-Length fails as incomplete", async () => {
   await assert.rejects(download(`${base}/short`, join(dir, "short.pdf"), { limits: FAST }), { code: "INCOMPLETE" });
+});
+
+test("a compressed response is complete even though Content-Length counts compressed bytes", async () => {
+  const got = await download(`${base}/gzip`, join(dir, "gzip.pdf"), { limits: FAST });
+  assert.equal(got.bytes, 200_000);
 });
