@@ -200,3 +200,8 @@ litfetch started as a fork of
 [bitesized/annas-archive-api](https://github.com/bitesized/annas-archive-api),
 a search page and download proxy for Anna's Archive. That project's history is
 kept in this repository; its code has since been replaced.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The license covers the code in this repository,
+not the documents litfetch downloads.

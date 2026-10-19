@@ -2,6 +2,7 @@
   "name": "litfetch",
   "version": "0.2.0",
   "description": "Queue, fetch and verify literature from open-access, grey-literature and opt-in shadow-library sources.",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "engines": {
