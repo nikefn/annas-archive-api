@@ -79,10 +79,6 @@ JSON. Public items need no account.
    `annas-archive.gl`, `.pk` and `.gd`; `.org`, `.li`, `.se` and `.pm` had been
    lost and must not be used.
 2. The key is shown once. It is the whole login, so keep it like a password.
-3. Buy a membership at `/donate`. Download credits per day by tier: 25, 50,
-   200 or 1000. A credit is used when a link is issued, not when the file is
-   fetched, and used credits return over a rolling window (`ANNAS_WINDOW_H`,
-   18 hours for most tiers).
 
 Search results, file records (name, size, content type, IPFS IDs) and SciDB
 pages for DOIs are free. litfetch tries the free routes first: SciDB, then up
