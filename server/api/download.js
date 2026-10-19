@@ -1,4 +1,4 @@
-import { fastDownload } from "../lib/annas.js";
+import { fastDownload } from "../../src/sources/annas.js";
 import { getBearerKey } from "./bearer.js";
 
 export default async function handler(req, res) {

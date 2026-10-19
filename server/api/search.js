@@ -1,4 +1,4 @@
-import { search, AnnasArchiveError } from "../lib/annas.js";
+import { search, AnnasArchiveError } from "../../src/sources/annas.js";
 import { getBearerKey } from "./bearer.js";
 
 const DEFAULT_LIMIT = 20;

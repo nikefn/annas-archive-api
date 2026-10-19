@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Book Search</title>
+  <title>litfetch</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -376,8 +376,8 @@
 </head>
 <body>
   <header>
-    <h1>Book Search</h1>
-    <p>Search by title, author, ISBN, DOI, or MD5</p>
+    <h1>litfetch</h1>
+    <p>Search Anna's Archive by title, author, ISBN, DOI or MD5 — download now or queue for checking</p>
   </header>
 
   <form class="search-bar" id="search-form" role="search" autocomplete="off" onsubmit="doSearch(event)">
@@ -673,6 +673,9 @@
         ? `<button class="dl-btn" onclick="handleDownload(event, '${esc(md5)}', this)" title="Fast download">
             <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12l-5-5h3V2h4v5h3L8 12z"/><rect x="2" y="13" width="12" height="2"/></svg>
             Download
+           </button>
+           <button class="dl-btn" onclick="handleQueue(event, '${esc(md5)}', this)" title="Add to the litfetch queue">
+            Queue
            </button>`
         : "";
 
@@ -719,6 +722,32 @@
         btn.className = "dl-btn error";
         btn.textContent = err.message.length < 30 ? err.message : "Error";
       } finally {
+        btn.disabled = false;
+      }
+    }
+
+    /** Add a result to the library queue; `litfetch run` fetches and checks it. */
+    async function handleQueue(e, md5, btn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const book = lastResults.find((b) => b.md5 === md5) || {};
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/queue", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: `md5:${md5}`,
+            title: book.title || undefined,
+            authors: book.author ? [book.author] : undefined,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Queue failed");
+        btn.textContent = data.created ? "Queued" : "Already queued";
+      } catch (err) {
+        btn.className = "dl-btn error";
+        btn.textContent = err.message.length < 30 ? err.message : "Error";
         btn.disabled = false;
       }
     }

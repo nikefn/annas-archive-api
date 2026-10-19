@@ -1,19 +1,25 @@
 /**
- * Anna's Archive search + download core.
+ * Anna's Archive: shadow-library search engine (books, papers, magazines).
+ * Opt-in source; needs a member account secret key (ANNAS_KEY).
  *
- * Ports the original Python service (parser.py + client.py) to JavaScript:
  *  - parseSearchResults: scrape the static search HTML into result objects.
- *  - search: fetch the search page, parse it, and fan out concurrent
+ *  - search: fetch the search page signed in, parse it, and fan out concurrent
  *    download-count lookups (those counts are loaded client-side by the real
  *    site from /dyn/md5/inline_info/<md5>, not present in the search HTML).
- *  - fastDownload: proxy a fast-download request using the caller's key.
+ *  - fastDownload: resolve an md5 to a download URL with the member key.
+ *  - default export: the litfetch source adapter built on the three above.
+ *
+ * The web UI in server/ uses the same functions with a per-request key.
  */
 
 import { createHash } from "node:crypto";
 
 import { load } from "cheerio";
 
-export const BASE_URL = process.env.ANNAS_BASE_URL || "https://annas-archive.gd";
+import { config } from "../config.js";
+import { client } from "../http.js";
+
+export const BASE_URL = config.annasBaseUrl;
 
 /**
  * Resolve the upstream base URL for a given TLD. Anna's Archive runs the same
@@ -31,18 +37,12 @@ export function resolveBaseUrl(tld) {
   return url.origin;
 }
 
-// A browser-like UA keeps DDoS-Guard from serving us a challenge page.
-const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-  "Accept-Language": "en-US,en;q=0.9",
-};
+// http.js sends a browser-like UA, which keeps DDoS-Guard from serving a challenge page.
+const HEADERS = { "Accept-Language": "en-US,en;q=0.9" };
+const http = client();
 
 // Cap on simultaneous inline_info requests so we stay polite to the origin.
 const DOWNLOAD_CONCURRENCY = 10;
-
-const REQUEST_TIMEOUT_MS = 30_000;
 
 // Anna's Archive pushes unauthenticated requests for /search and /md5/ through a
 // DDoS-Guard JS challenge that a plain fetch cannot solve; a signed-in session
@@ -183,25 +183,8 @@ export function parseSearchResults(html, baseUrl = BASE_URL) {
   return results;
 }
 
-async function fetchWithTimeout(url, options = {}) {
-  return fetch(url, { ...options, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
-}
-
 function sessionId(key, baseUrl) {
   return createHash("sha256").update(`${key}\n${baseUrl}`).digest("hex");
-}
-
-/**
- * Read Set-Cookie as a list. `getSetCookie()` needs a newer undici than our
- * Node 18 floor guarantees, so fall back to splitting the joined header — only
- * before a `name=` so a comma inside an Expires date doesn't split a cookie.
- */
-function readSetCookies(resp) {
-  if (typeof resp.headers.getSetCookie === "function") {
-    return resp.headers.getSetCookie();
-  }
-  const raw = resp.headers.get("set-cookie");
-  return raw ? raw.split(/,(?=\s*[A-Za-z0-9_-]+=)/) : [];
 }
 
 /**
@@ -212,7 +195,7 @@ function readSetCookies(resp) {
 async function login(baseUrl, key) {
   let resp;
   try {
-    resp = await fetchWithTimeout(`${baseUrl}/account/`, {
+    resp = await http.request(`${baseUrl}/account/`, {
       method: "POST",
       headers: { ...HEADERS, "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({ key }).toString(),
@@ -222,7 +205,7 @@ async function login(baseUrl, key) {
     throw new AnnasArchiveError(`Failed to reach Anna's Archive: ${err.message}`);
   }
 
-  const cookie = readSetCookies(resp)
+  const cookie = resp.headers.getSetCookie()
     .map((c) => c.split(";")[0].trim())
     .filter((c) => c.startsWith("aa_") && c.includes("="))
     .join("; ");
@@ -276,7 +259,7 @@ function challengeError() {
 async function fetchFollowing(url, options) {
   let current = new URL(url);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const resp = await fetchWithTimeout(current, { ...options, redirect: "manual" });
+    const resp = await http.request(current, { ...options, redirect: "manual" });
     if (isChallenge(resp)) throw challengeError();
     if (resp.status < 300 || resp.status >= 400) return resp;
     const loc = resp.headers.get("location");
@@ -293,7 +276,7 @@ async function fetchFollowing(url, options) {
  */
 async function fetchDownloads(result, baseUrl = BASE_URL) {
   try {
-    const resp = await fetchWithTimeout(
+    const resp = await http.request(
       `${baseUrl}/dyn/md5/inline_info/${result.md5}`,
       { headers: { ...HEADERS, Accept: "text/css" } }
     );
@@ -391,7 +374,7 @@ export async function fastDownload(md5, key, { tld } = {}) {
 
   let resp;
   try {
-    resp = await fetchWithTimeout(url, { headers: HEADERS });
+    resp = await http.request(url, { headers: HEADERS });
   } catch (err) {
     throw new AnnasArchiveError(`Failed to reach Anna's Archive: ${err.message}`);
   }
@@ -404,3 +387,30 @@ export async function fastDownload(md5, key, { tld } = {}) {
   }
   return data;
 }
+
+/**
+ * Source adapter. Searches by DOI, ISBN or title (an md5 is used as is), then
+ * resolves each md5 to a signed fast-download URL just before download.
+ */
+export default {
+  id: "annas",
+  name: "Anna's Archive",
+  missing: () => (config.keys.annas ? [] : ["ANNAS_KEY"]),
+
+  async find(q) {
+    if (q.md5) return [{ meta: { md5: q.md5 }, files: [{ md5: q.md5 }] }];
+    const term = q.doi || q.isbn || q.title;
+    if (!term) return [];
+    const results = await search(term, { limit: 10, includeDownloads: false, key: config.keys.annas });
+    return results.map((r) => ({
+      meta: { title: r.title, authors: r.author ? [r.author] : [], md5: r.md5 },
+      files: [{ md5: r.md5, format: r.format }],
+    }));
+  },
+
+  async resolve(file) {
+    const data = await fastDownload(file.md5, config.keys.annas);
+    if (!data.download_url) throw new AnnasArchiveError(data.error || "no download_url");
+    return { url: data.download_url };
+  },
+};

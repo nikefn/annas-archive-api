@@ -1,21 +1,17 @@
 # Dependencies
 node_modules/
 
-# Secrets / keys (never commit these)
+# Settings and keys (copy .env.example to .env)
 .env
 .env.*
+!.env.example
 
-# Logs
+# Downloaded content lives outside the code
+library/
+
+# Logs and OS/editor cruft
 *.log
-npm-debug.log*
-
-# OS / editor cruft
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-
-# Docker image tarballs (from `docker save`)
-*.tar
-*.tar.gz
-

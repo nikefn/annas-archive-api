@@ -1,19 +1,26 @@
 {
-  "name": "annas-archive-api",
-  "version": "1.0.0",
-  "description": "Self-contained Anna's Archive search UI + fast-download proxy.",
+  "name": "litfetch",
+  "version": "0.1.0",
+  "description": "Queue, fetch and verify literature from open-access, grey-literature and (opt-in) shadow-library sources.",
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13"
+  },
+  "bin": {
+    "litfetch": "src/cli.js"
   },
   "scripts": {
-    "dev": "node dev.mjs",
-    "start": "node dev.mjs",
+    "litfetch": "node src/cli.js",
+    "ui": "node server/index.js",
+    "start": "node server/index.js",
     "test": "node --test"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
     "cheerio": "^1.0.0",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "fflate": "^0.8.3",
+    "pdfjs-dist": "^6.4.299"
   }
 }

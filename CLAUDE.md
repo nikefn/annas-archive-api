@@ -1,58 +1,80 @@
-# annas-archive-api
+# litfetch — agent guide
 
-Self-contained Anna's Archive search UI + fast-download proxy. Node 18+, no build step.
+Queue → find → download → verify literature from open-access, grey-literature
+and opt-in shadow-library sources. Node 22.13+, ESM, no build step.
 
 ## Commands
 
 ```bash
-npm run dev          # Express server at http://localhost:3000
-npm test             # Offline parser tests (no network needed)
-PORT=4020 npm run dev  # Use a different port
+npm install
+npm test                         # offline: no network, no keys
+node src/cli.js <command>        # or `npm link` once, then `litfetch <command>`
+npm run ui                       # web UI at http://localhost:3000
 ```
 
-## Architecture
+## Map
 
 ```
-lib/annas.js          Core: parseSearchResults, search, fastDownload
-api/search.js         Thin handler — validation + JSON shaping only
-api/download.js       Thin handler — key extraction + proxy only
-api/bearer.js         Shared `Authorization: Bearer` parsing for both handlers
-public/index.html     Entire frontend (HTML + CSS + vanilla JS, no build)
-dev.mjs               Express server wiring (static + api/ routes)
-test/parse.test.mjs   Parser tests using saved fixture HTML
+src/config.js        every setting (env / .env) — nothing else reads process.env
+src/http.js          every network request: UA, timeout, retries, per-source spacing
+src/ids.js           input line → query; query → work id; slugs
+src/text.js          normalise / similarity — the one definition of "matches"
+src/store.js         library on disk; work.json is the single source of truth
+src/pipeline.js      gather → merge → download → check → keep best
+src/download.js      stream to disk with md5 + sha256, size cap
+src/checks/rules.js  the quality standard (all checks, thresholds, verdict rule)
+src/checks/file.js   format detection by bytes; PDF/EPUB text extraction
+src/checks/llm.js    optional model triage of uncertain identity checks
+src/sources/*.js     one adapter per source; interface in sources/index.js
+src/export.js        RIS export (attaches files in reference managers)
+src/cli.js           commands
+server/              web UI (search Anna's Archive, download, queue)
+test/                offline tests; documents are generated, not stored
+docs/sources.md      every source: what it holds, credentials, limits
+library/             content (git-ignored), never code
 ```
 
-The handlers in `api/` must stay framework-agnostic (`req.query` in, `res.status().json()` out). All real logic belongs in `lib/annas.js`.
+## Invariants
 
-## Non-obvious constraints
+- Code and content stay apart: nothing under `library/` is code; nothing in the repo is content.
+- A file's format is decided by its bytes (`detectFormat`), never by URL or Content-Type.
+- Every downloaded file passes through `checks/rules.js`; status follows from the verdict only.
+- Keys are read from config only, never logged, and redacted from URLs saved in records.
+  The web server never uses env keys: it takes the Anna's Archive key per request
+  (`Authorization: Bearer`) and keeps only a hashed-key session cookie in memory.
+- Network-dependent tests are not allowed. Adapters export pure mappers
+  (`toCandidate`, `parse…`) and those are what the tests exercise.
+- Public repository: no personal data, names, emails or local paths in code, docs or fixtures.
 
-**User-Agent is required.** Every upstream request must send a browser-like UA or DDoS-Guard returns a challenge page instead of HTML.
+## Adding a source
 
-**Searches must be signed in.** Anna's Archive pushes *unauthenticated* requests for
-`/search` and `/md5/` through a DDoS-Guard JS challenge that `fetch` cannot solve —
-a headless browser can't either (only headful passes). A signed-in session skips the
-check entirely, so `search()` takes a `key` and trades it for a session cookie via
-`POST /account/`. The `/dyn/*` JSON endpoints (`inline_info`, `fast_download.json`)
-are **not** gated, so downloads work without any of this.
+1. `src/sources/<id>.js`: default export `{ id, name, missing(), find(q), resolve? }`
+   (contract in `src/sources/index.js`). Use `client({ minIntervalMs })` from `http.js`
+   at the source's published rate limit. Return `[]` for queries it cannot serve.
+2. Register it in `src/sources/index.js`; add it to `DEFAULT_SOURCES` in
+   `src/config.js` only if it is open and keyless-or-free.
+3. New setting → `src/config.js` + `.env.example`.
+4. A test for its mapper in `test/sources.test.mjs`; a row in `docs/sources.md`.
 
-**A challenge is not always a 403.** An expired session gets a 302 to the same path
-with `check=1`, which loops until `fetch` throws "redirect count exceeded". That is
-why `search()` drives redirects manually (`redirect: "manual"`) instead of following
-them — see `isChallenge()`.
+## When something changes, update
 
-**Concurrency cap on inline_info.** The `DOWNLOAD_CONCURRENCY = 10` limit in `lib/annas.js` is a politeness cap — do not raise it significantly.
+| Change                         | Also update                         |
+| ------------------------------ | ----------------------------------- |
+| check added/removed/threshold  | README "Quality checks" table       |
+| setting added/renamed          | `.env.example`                      |
+| source added/changed access    | `docs/sources.md`                   |
+| record shape (`work.json`)     | header comment in `src/store.js`    |
 
-**Download key never touches disk.** The key is passed per-request via `Authorization: Bearer` and stored only in the browser's `localStorage`. The server must never log or persist it. The same key is the account secret key used to log in; the in-memory `sessions` cache in `lib/annas.js` stores only the *derived* session cookie, under a sha256 of the key — never the key itself.
+## Model triage
 
-**Frontend has no build step.** `public/index.html` is a single file with inline CSS and JS. Do not introduce a bundler.
+For agents working on this repo:
 
-## Environment variables
+| Model  | Use for |
+| ------ | ------- |
+| Haiku  | Mechanical edits: renames, docs wording, mapper tweaks from a known response shape, running tests |
+| Sonnet | A new source adapter, bug fixes, test additions, CLI commands |
+| Opus   | Changes to `checks/rules.js`, `pipeline.js` or `store.js`, record-shape changes, security-sensitive code (keys, server) |
 
-| Variable             | Default                    | Purpose                                   |
-| -------------------- | -------------------------- | ----------------------------------------- |
-| `PORT`               | `3000`                     | Dev server port                           |
-| `ANNAS_BASE_URL`     | `https://annas-archive.gd` | Upstream mirror                           |
-
-## Tests
-
-Tests are offline — they parse `test/fixtures/search_test-search.html`. If Anna's Archive changes their HTML structure, update the fixture and the expected values in `parse.test.mjs` together. Do not add network-dependent tests.
+In the pipeline, `LITFETCH_LLM_MODELS` applies the same ladder: the cheapest model
+answers first, "unsure" escalates. It only runs when the identity check warned
+and `ANTHROPIC_API_KEY` is set.
