@@ -328,7 +328,7 @@
     .format-badge.djvu { color: #ffd54f; border-color: #4a3a00; background: #1e1800; }
     .format-badge.mobi { color: #ce93d8; border-color: #3a1a4a; background: #180e20; }
 
-    /* Everything else — fb2, azw3, cbz, txt … — shares one badge colour so the
+    /* Everything else (fb2, azw3, cbz, txt, ...) shares one badge colour so the
        four common formats stay distinguishable at a glance. */
     .format-badge.other { color: #8899ff; border-color: #3a3a55; background: #2a2a3e; }
 
@@ -377,7 +377,7 @@
 <body>
   <header>
     <h1>litfetch</h1>
-    <p>Search Anna's Archive by title, author, ISBN, DOI or MD5 — download now or queue for checking</p>
+    <p>Search Anna's Archive by title, author, ISBN, DOI or MD5, then download or queue for checking</p>
   </header>
 
   <form class="search-bar" id="search-form" role="search" autocomplete="off" onsubmit="doSearch(event)">
@@ -420,7 +420,16 @@
              data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" />
       <button id="dl-key-save" onclick="saveKey()">Save</button>
     </div>
-    <p class="settings-hint">Stored locally in your browser and sent to your own server only. Needed for searches as well as downloads — signed-in searches skip Anna's Archive's bot check. <span id="key-state"></span></p>
+    <p class="settings-hint">Stored locally in your browser and sent to your own server only. Needed for searches as well as downloads, because signed-in searches skip Anna's Archive's bot check. <span id="key-state"></span></p>
+
+    <label for="ui-token" class="spaced">Queue token</label>
+    <div class="settings-row">
+      <input type="text" id="ui-token" class="masked" placeholder="LITFETCH_UI_TOKEN of this server"
+             autocomplete="off" spellcheck="false" autocapitalize="off"
+             data-1p-ignore data-lpignore="true" data-bwignore="true" data-form-type="other" />
+      <button onclick="saveToken()">Save</button>
+    </div>
+    <p class="settings-hint">The Queue button adds works to the server's library and needs the token set in the server's LITFETCH_UI_TOKEN.</p>
 
     <hr class="settings-divider" />
 
@@ -435,8 +444,8 @@
       <option value=".gd"></option>
       <option value=".gl"></option>
     </datalist>
-    <p class="settings-hint">Leave blank to use the server's default mirror. Anna's Archive rotates its domains, so the suggestions above go stale — check the current list on the <a href="https://en.wikipedia.org/wiki/Anna%27s_Archive" target="_blank" rel="noopener noreferrer">Anna's Archive Wikipedia page</a> before changing this.</p>
-    <p class="settings-warning"><span aria-hidden="true">&#9888;</span> <span><strong>Your download key is sent to whichever mirror you set here.</strong> A mistyped, outdated, or squatted domain will receive it in the request URL. Retired mirrors do get re-registered by third parties &mdash; <code>annas-archive.li</code> now resolves to a domain-parking page rather than Anna's Archive.</span></p>
+    <p class="settings-hint">Leave blank to use the mirrors the server is configured with (ANNAS_MIRRORS), starting with the one that last worked. Anything else must be one of them; the server refuses other domains.</p>
+    <p class="settings-warning"><span aria-hidden="true">&#9888;</span> <span><strong>Your download key is sent to the mirror in use.</strong> Retired Anna's Archive domains get re-registered by third parties, so keep the server's mirror list current.</span></p>
   </div>
 
   <div id="status"></div>
@@ -450,10 +459,8 @@
     const sortSelect = document.getElementById("sort");
     const typeSelect = document.getElementById("type");
 
-    // --- Mirror (TLD) selection, persisted locally. Lives in the Settings
-    // panel because the download key is sent to whichever mirror is set here.
-    // Free-text with a few suggested TLDs (see the datalist); anything the
-    // user types is accepted.
+    // --- Mirror (TLD) selection, persisted locally. The server accepts only
+    // mirrors from its own ANNAS_MIRRORS list.
     const TLD_STORAGE = "annasTld";
     const tldInput = document.getElementById("tld");
     tldInput.value = localStorage.getItem(TLD_STORAGE) || "";
@@ -461,8 +468,7 @@
       localStorage.setItem(TLD_STORAGE, tldInput.value.trim());
     });
 
-    // Normalize to a bare TLD the API expects: drop a leading dot, lowercase.
-    // Empty means "use the server default mirror".
+    // Normalize to a bare TLD: drop a leading dot, lowercase. Empty means the server's choice.
     function getTld() {
       return tldInput.value.trim().replace(/^\.+/, "").toLowerCase();
     }
@@ -506,6 +512,16 @@
 
     updateKeyState();
 
+    // --- Queue token for POST /api/queue, stored locally like the key ---
+    const TOKEN_STORAGE = "litfetchUiToken";
+    const getToken = () => localStorage.getItem(TOKEN_STORAGE) || "";
+    document.getElementById("ui-token").value = getToken();
+    function saveToken() {
+      const value = document.getElementById("ui-token").value.trim();
+      if (value) localStorage.setItem(TOKEN_STORAGE, value);
+      else localStorage.removeItem(TOKEN_STORAGE);
+    }
+
     async function doSearch(event) {
       if (event) event.preventDefault();
       const query = queryInput.value.trim();
@@ -531,7 +547,7 @@
         const data = await res.json();
 
         if (!res.ok) {
-          // A bot check or a rejected key is fixable in Settings — open it.
+          // A bot check or a rejected key is fixable in Settings, so open it.
           if (res.status === 401) {
             const panel = document.getElementById("settings");
             if (panel.hidden) toggleSettings();
@@ -735,7 +751,7 @@
       try {
         const res = await fetch("/api/queue", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Litfetch-Token": getToken() },
           body: JSON.stringify({
             input: `md5:${md5}`,
             title: book.title || undefined,

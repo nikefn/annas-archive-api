@@ -14,7 +14,7 @@ import { makeEpub, makePdf, prose } from "./helpers.mjs";
 const dir = mkdtempSync(join(tmpdir(), "litfetch-checks-"));
 const META = { title: "Glacier Retreat in the Alps", authors: ["Muster, Erika"], year: 2021, pages: 2 };
 
-async function check(name, bytes, { meta = META, expected = {}, candidates } = {}) {
+async function check(name, bytes, { meta = META, expected = {}, candidates, kind = "article", language } = {}) {
   const path = join(dir, name);
   writeFileSync(path, bytes);
   const file = {
@@ -26,7 +26,9 @@ async function check(name, bytes, { meta = META, expected = {}, candidates } = {
     file,
     expected,
     meta,
-    candidates: candidates ?? [{ source: "crossref", meta }],
+    kind,
+    language,
+    candidates: candidates ?? [{ source: "crossref", tier: "same", meta }],
     duplicates: new Map(),
   });
   result.byName = Object.fromEntries(result.checks.map((c) => [c.name, c.status]));
@@ -34,10 +36,13 @@ async function check(name, bytes, { meta = META, expected = {}, candidates } = {
 }
 
 const goodPdf = makePdf([`Glacier Retreat in the Alps by Erika Muster ${prose()}`, prose()]);
+const english = "the river and the valley of the glacier is in the north and the ice that was on the hill ".repeat(4);
+const german = "der Fluss und die Gletscher sind nicht mit dem Eis auf der Alm und das ist ein Tal ".repeat(4);
 
-test("detects formats by content", () => {
+test("formats are detected by content", () => {
   assert.equal(detectFormat(goodPdf.subarray(0, 64)), "pdf");
   assert.equal(detectFormat(Buffer.from("<!DOCTYPE html><html>")), "html");
+  assert.equal(detectFormat(Buffer.from('  {"error": "not found"}')), "json");
   assert.equal(detectFormat(makeEpub({ title: "t", creator: "c", chapters: ["x"] }).subarray(0, 64)), "epub");
   assert.equal(detectFormat(Buffer.from("AT&TFORM....DJVU")), "djvu");
 });
@@ -48,15 +53,25 @@ test("a matching, complete PDF passes", async () => {
   assert.equal(r.format, "pdf");
 });
 
-test("an HTML page saved as PDF fails", async () => {
-  const r = await check("paywall.pdf", Buffer.from("<html><body>Please log in</body></html>"));
-  assert.equal(r.verdict, "fail");
-  assert.equal(r.byName.format, "fail");
+test("an HTML or JSON body fails, whatever it was served as", async () => {
+  assert.equal((await check("login.pdf", Buffer.from("<html><body>Please log in</body></html>"))).byName.format, "fail");
+  assert.equal((await check("error.pdf", Buffer.from('{"error":"no access"}'))).byName.format, "fail");
 });
 
-test("a truncated PDF fails", async () => {
-  const r = await check("cut.pdf", makePdf([`Glacier Retreat in the Alps ${prose()}`], { truncate: true }));
-  assert.equal(r.byName.opens, "fail");
+test("a truncated PDF or EPUB fails", async () => {
+  const pdf = await check("cut.pdf", makePdf([`Glacier Retreat in the Alps ${prose()}`], { truncate: true }));
+  assert.equal(pdf.byName.opens, "fail");
+  const epub = makeEpub({ title: META.title, creator: "Erika Muster", chapters: [prose(), prose()] });
+  const cut = await check("cut.epub", epub.subarray(0, epub.length - 30), { kind: "book" });
+  assert.equal(cut.byName.opens, "fail");
+});
+
+test("a DRM-protected EPUB fails; font obfuscation alone does not", async () => {
+  const base = { title: META.title, creator: "Erika Muster", chapters: [prose(), prose()] };
+  const drm = await check("drm.epub", makeEpub({ ...base, encrypted: ["OEBPS/c0.xhtml"] }), { kind: "book" });
+  assert.equal(drm.byName.drm, "fail");
+  const fonts = await check("fonts.epub", makeEpub({ ...base, encrypted: ["OEBPS/fonts/a.otf"] }), { kind: "book" });
+  assert.equal(fonts.byName.drm, undefined);
 });
 
 test("a different work fails identity", async () => {
@@ -87,11 +102,30 @@ test("a preview with far fewer pages than expected fails", async () => {
   assert.equal(r.byName.length, "fail");
 });
 
+test("without an expected count a book needs 40 pages, an article 2", async () => {
+  const meta = { ...META, pages: undefined };
+  assert.equal((await check("short-book.pdf", goodPdf, { meta, kind: "book" })).byName.length, "fail");
+  assert.equal((await check("article.pdf", goodPdf, { meta, kind: "article" })).byName.length, "pass");
+});
+
+test("a chapter printed from an online platform is not the book", async () => {
+  const pages = [`Glacier Retreat in the Alps Erika Muster Page 1 of 2 ${prose()}`, `Page 2 of 2 ${prose()}`];
+  const r = await check("printout.pdf", makePdf(pages), { kind: "book", meta: { ...META, pages: 2 } });
+  assert.equal(r.byName.printout, "fail");
+});
+
+test("a text in another language than the work wants fails", async () => {
+  const pdf = makePdf([`Glacier Retreat in the Alps Erika Muster ${german}`, german]);
+  assert.equal((await check("de.pdf", pdf, { language: "en" })).byName.language, "fail");
+  const en = makePdf([`Glacier Retreat in the Alps Erika Muster ${english}`, english]);
+  assert.equal((await check("en.pdf", en, { language: "en" })).byName.language, "pass");
+});
+
 test("disagreeing sources and missing fields put a work into review", async () => {
   const meta = { title: META.title, authors: [] };
   const candidates = [
-    { source: "crossref", meta },
-    { source: "openalex", meta: { title: "An unrelated book about cooking" } },
+    { source: "crossref", tier: "same", meta },
+    { source: "openalex", tier: "same", meta: { title: "An unrelated book about cooking" } },
   ];
   const r = await check("meta.pdf", goodPdf, { meta, candidates });
   assert.equal(r.byName["metadata-complete"], "warn");
@@ -101,7 +135,7 @@ test("disagreeing sources and missing fields put a work into review", async () =
 
 test("EPUB metadata and text are read", async () => {
   const epub = makeEpub({ title: META.title, creator: "Erika Muster", chapters: [prose(), prose()] });
-  const r = await check("book.epub", epub);
+  const r = await check("book.epub", epub, { kind: "book" });
   assert.equal(r.format, "epub");
   assert.equal(r.byName.identity, "pass");
   assert.equal(r.byName.author, "pass");

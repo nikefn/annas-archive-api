@@ -7,7 +7,7 @@ import { client } from "../http.js";
 import { bareDoi, pageCount, searchTerms, yearOf } from "./meta.js";
 
 const API = "https://www.ebi.ac.uk/europepmc/webservices/rest/search";
-const http = client({ minIntervalMs: 200 });
+const http = client();
 
 export function toCandidate(r) {
   const urls = r.fullTextUrlList?.fullTextUrl ?? [];

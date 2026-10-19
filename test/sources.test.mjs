@@ -14,7 +14,7 @@ import * as dspace from "../src/sources/dspace.js";
 import * as libgen from "../src/sources/libgen.js";
 import * as openalex from "../src/sources/openalex.js";
 import * as unpaywall from "../src/sources/unpaywall.js";
-import * as url from "../src/sources/url.js";
+import * as web from "../src/sources/web.js";
 import * as worldbank from "../src/sources/worldbank.js";
 import * as zenodo from "../src/sources/zenodo.js";
 
@@ -86,7 +86,7 @@ test("arxiv: Atom entries", () => {
 });
 
 test("landing pages: citation_* meta tags", () => {
-  const c = url.parseLandingPage(
+  const c = web.parseLandingPage(
     `<meta name="citation_title" content="Policy Brief 7">
      <meta name="citation_author" content="Doe, Jo">
      <meta name="citation_publication_date" content="2022/03/01">
@@ -144,4 +144,16 @@ test("libgen: identifiers from the results table, metadata from JSON", () => {
   const c = libgen.toCandidate({ title: "Book", author: "A One; B Two", year: "2018", pages: "500" }, rows[0].md5);
   assert.deepEqual(c.meta.authors, ["A One", "B Two"]);
   assert.deepEqual(c.files, [{ md5: rows[0].md5 }]);
+});
+
+test("web: PDF URLs that follow from a DOI alone", () => {
+  assert.deepEqual(web.publisherPdf("10.1007/s00134-020-06294-x"), ["https://link.springer.com/content/pdf/10.1007/s00134-020-06294-x.pdf"]);
+  assert.deepEqual(web.publisherPdf("10.1111/j.1365-2486.2009.x"), ["https://onlinelibrary.wiley.com/doi/pdfdirect/10.1111/j.1365-2486.2009.x"]);
+  assert.deepEqual(web.publisherPdf("10.1038/nature12373"), []);
+});
+
+test("libgen: file record gives name, size and format", () => {
+  const info = libgen.describeFile({ 93485370: { locator: "Book (2018).pdf", filesize: "18298205", extension: "pdf" } });
+  assert.deepEqual(info, { name: "Book (2018).pdf", size: 18298205, format: "pdf" });
+  assert.deepEqual(libgen.describeFile([]), {});
 });

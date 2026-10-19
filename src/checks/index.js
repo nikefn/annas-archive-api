@@ -12,12 +12,14 @@ import { evaluate, verdictOf } from "./rules.js";
  * @param file        { md5, sha256, bytes } from the download
  * @param expected    the candidate file entry (may carry a reference md5)
  * @param meta        merged metadata of the work
+ * @param kind        "book", "article", "report" or "other"
+ * @param language    ISO 639-1 code the work must be in, or undefined
  * @param candidates  everything the sources returned for the work
  * @param duplicates  Map sha256 -> id of another work holding that file
  */
-export async function checkFile({ path, file, expected, meta, candidates, duplicates }) {
+export async function checkFile({ path, file, expected, meta, kind, language, candidates, duplicates }) {
   const doc = await readDocument(path);
-  const ctx = { doc, file, expected, meta, candidates, duplicates };
+  const ctx = { doc, file, expected, meta, kind, language, candidates, duplicates };
   const checks = evaluate(ctx);
 
   const identity = checks.find((c) => c.name === "identity");

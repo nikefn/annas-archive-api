@@ -5,28 +5,29 @@ shows which ones are active right now. Settings go in `.env` (see `.env.example`
 
 ## Implemented
 
-| id | Holds | Searches by | Needs | Limit (spacing in code) | Default |
+| id | Holds | Searches by | Needs | Pace per host | Default |
 | --- | --- | --- | --- | --- | --- |
-| `url` | Any URL; landing pages via `citation_*` meta tags | URL | – | 1/s | on |
-| `crossref` | DOI metadata, retractions, CC-licensed publisher PDFs | DOI, citation | `LITFETCH_EMAIL` recommended | 1/s; 3/s with email | on |
+| `web` | Any URL, and the page a DOI resolves to; metadata and PDF link from `citation_*` meta tags, plus DOI-only PDF URLs of Springer, Wiley, Taylor & Francis and SAGE | URL, DOI | none | 1/s | on |
+| `crossref` | DOI metadata, retractions, CC-licensed publisher PDFs | DOI, citation | `LITFETCH_EMAIL` recommended | 1/s; about 3/s with email | on |
 | `openalex` | 250M works, OA locations, retraction flags | DOI, PMID, PMCID, title | `OPENALEX_API_KEY` | 10/s | on |
 | `unpaywall` | Legal OA copies of a DOI | DOI | `LITFETCH_EMAIL` | 10/s, 100k/day | on |
-| `arxiv` | Preprints (physics, maths, CS, …) | arXiv id, title | – | 1 per 3 s | on |
-| `europepmc` | Life sciences, PMC open-access PDFs | DOI, PMID, PMCID, title | – | 5/s | on |
-| `semanticscholar` | 200M+ papers, OA PDF links | DOI, arXiv, PMID, title | `SEMANTIC_SCHOLAR_API_KEY` optional | ~1/s | on |
+| `arxiv` | Preprints (physics, maths, CS and more) | arXiv id, title | none | 1 per 3 s | on |
+| `europepmc` | Life sciences, PMC open-access PDFs | DOI, PMID, PMCID, title | none | 5/s | on |
+| `semanticscholar` | 200M+ papers, OA PDF links | DOI, arXiv, PMID, title | `SEMANTIC_SCHOLAR_API_KEY` optional | about 1/s | on |
 | `core` | Repository full texts, theses, reports | DOI, arXiv, title | `CORE_API_KEY` optional | 1 per 2 s; 1/s with key | on |
-| `hal` | French open archive: papers, theses, reports | DOI, title | – | 2/s | on |
-| `zenodo` | Reports, deliverables, preprints (with md5) | DOI, title | – | 30/min | on |
-| `worldbank` | World Bank documents and reports | title | – | 2/s | on |
-| `dspace` | DSpace 7+ repositories (WHO IRIS, World Bank OKR, FAO, universities) | DOI, title | `DSPACE_REPOSITORIES` | 2/s | on |
-| `unods` | Official UN documents | `symbol: A/RES/70/1` | – | – | on |
-| `cellar` | EU law, Official Journal, EU publications | `celex: 32016R0679` | – | 1/s | on |
-| `openaire` | EU research graph, project reports and deliverables | DOI, title | – | 60/hour anonymous | opt-in |
-| `annas` | Anna's Archive: books, papers, magazines | DOI, ISBN, md5, title | `ANNAS_KEY` (paid membership) | membership quota/day | opt-in |
-| `libgen` | Library Genesis: books, articles | DOI, ISBN, md5, title | – | 1/s | opt-in |
+| `hal` | French open archive: papers, theses, reports | DOI, title | none | 2/s | on |
+| `zenodo` | Reports, deliverables, preprints (with md5) | DOI, title | none | 30/min | on |
+| `worldbank` | World Bank documents and reports | title | none | 2/s | on |
+| `dspace` | DSpace 7+ repositories (WHO IRIS, World Bank OKR, FAO, universities) | DOI, title | `DSPACE_REPOSITORIES` | 1/s per repository | on |
+| `unods` | Official UN documents | `symbol: A/RES/70/1` | none | 1/s | on |
+| `cellar` | EU law, Official Journal, EU publications | `celex: 32016R0679` | none | 1/s | on |
+| `openaire` | EU research graph, project reports and deliverables | DOI, title | none | 60/hour anonymous | opt-in |
+| `annas` | Anna's Archive: books, papers, magazines | DOI, ISBN, md5, title | `ANNAS_KEY` (paid membership) | 1 per 1.5 s; daily credit quota | opt-in |
+| `libgen` | Library Genesis: books, articles | DOI, ISBN, md5, title | none | 1 per 2 s | opt-in |
 
 To opt in, add the id to `LITFETCH_SOURCES`. The order of that list is the
-priority for both metadata and files.
+priority for metadata and files. The pace applies to every request to a host,
+downloads included; `LITFETCH_PACE` overrides it per host.
 
 ## Setting up credentials
 
@@ -61,26 +62,32 @@ URLs of DSpace 7 or later sites. A site qualifies if
 `<base>/server/api/discover/search/objects?query=test` returns JSON. No
 account needed for public items.
 
-**Anna's Archive** (`ANNAS_KEY`, `ANNAS_BASE_URL`), paid.
+**Anna's Archive** (`ANNAS_KEY`, `ANNAS_MIRRORS`), paid.
 1. Register at `/account/` on a current mirror. Live domains as of October
    2026: `annas-archive.gl`, `.pk` and `.gd`. The `.org`, `.li`, `.se` and
    `.pm` domains were lost and must not be used.
 2. The secret key is shown once. It is the whole login, so store it like a
    password.
 3. Buy a membership at `/donate`. Fast downloads per day by tier: 25, 50, 200
-   or 1000. A download URL uses quota when it is issued, not when the file is
-   fetched.
+   or 1000. A link uses quota when it is issued, not when the file is fetched,
+   and used quota returns over a rolling window (`ANNAS_WINDOW_H`, 18 hours
+   for most tiers).
 
-The key is sent to whichever mirror you configure, so a squatted domain
-would receive it.
+The key is sent only to the mirrors in `ANNAS_MIRRORS`. Search results, file
+records (name, size, content type, IPFS ids) and SciDB pages for DOIs cost no
+quota. litfetch tries free routes first: SciDB, then up to three IPFS gateways
+(`IPFS_GATEWAYS`), and only then a fast-download link, at most
+`ANNAS_MAX_PER_WORK` per work and run. When the quota is used up it stops
+asking and the works wait for the refill.
 
 **Library Genesis** (`LIBGEN_MIRRORS`): no account. The `libgen.li` family
-(`.li`, `.vg`, `.gl`, `.bz`, `.la`) works. The old `.rs`, `.is` and `.st`
-mirrors are effectively dead. Mirrors are tried in order.
+(`.li`, `.vg`, `.gl`, `.bz`, `.la`) works; the old `.rs`, `.is` and `.st`
+mirrors are effectively dead. The mirror that answered last is tried first.
 
-**Model triage** (`ANTHROPIC_API_KEY`), optional and pay-per-use. Create a key
-at <https://console.anthropic.com>. Triage only runs on files whose identity
-check warned, and the cheapest model answers first.
+**Model triage** (`ANTHROPIC_API_KEY`, `LITFETCH_LLM_MODELS`), optional and
+pay-per-use. Create a key at <https://console.anthropic.com> and list the models
+to ask, cheapest first. Triage only runs on files whose identity check warned,
+and their opening pages are sent to the Anthropic API.
 
 ## Considered, not implemented
 
@@ -91,12 +98,12 @@ check warned, and the cheapest model answers first.
 | BASE (Bielefeld) | Needs a key and a whitelisted IP, requested by form, and is limited to non-commercial use. |
 | ReliefWeb | Since November 2025 only approved `appname` values are accepted (apply by form). |
 | govinfo.gov / Congress.gov | Free api.data.gov key. Searches are POST requests; PDFs are at `govinfo.gov/content/pkg/<id>/pdf/<id>.pdf`. A candidate for a new adapter. |
-| OECD, IMF, UNESCO, ILO, UNHCR, UNDP, SSRN | No public search API. A landing-page URL often works through `url` (`citation_*` tags). |
+| OECD, IMF, UNESCO, ILO, UNHCR, UNDP, SSRN | No public search API. A landing-page URL often works through `web` (`citation_*` tags). |
 | OAI-PMH endpoints | A harvesting protocol with no search, so it doesn't fit look-up-by-work. Repositories that speak it usually also have a DSpace, EPrints or HAL search API. |
 | DOAJ | Its links point to landing pages, and Unpaywall and OpenAlex already cover OA journals. |
 | Sci-Hub | Nothing new added since 2020, and blocked in several countries. Anna's Archive and LibGen serve its corpus by DOI. |
-| Zotero Web API (pyzotero) | `litfetch export` writes RIS with `L1` file paths. Zotero desktop (File → Import) imports items with their PDFs attached, with no API key needed. |
-| Zotero translation-server | Resolves landing pages to metadata. Most repositories already expose `citation_*` tags, which `url` reads. |
+| Zotero Web API (pyzotero) | `litfetch export` writes RIS with `L1` file paths. Zotero desktop (File, Import) imports items with their PDFs attached, with no API key needed. |
+| Zotero translation-server | Resolves landing pages to metadata. Most repositories already expose `citation_*` tags, which `web` reads. |
 
 ## Related open-source tools
 

@@ -1,7 +1,7 @@
 {
   "name": "litfetch",
-  "version": "0.1.0",
-  "description": "Queue, fetch and verify literature from open-access, grey-literature and (opt-in) shadow-library sources.",
+  "version": "0.2.0",
+  "description": "Queue, fetch and verify literature from open-access, grey-literature and opt-in shadow-library sources.",
   "type": "module",
   "private": true,
   "engines": {

@@ -1,22 +1,28 @@
 /**
  * Source registry. A source is a module whose default export is:
  *
- *   id        short name used in LITFETCH_SOURCES and in work records
- *   name      human-readable name
- *   missing() names of settings it still needs (empty array = ready)
- *   find(q)   -> Promise<Candidate[]> for a query { doi, arxiv, isbn, title, … }
- *   resolve?  (file) -> Promise<{ url, headers?, md5? }>, only for files whose
- *             link must be looked up or signed right before download
+ *   id         short name used in LITFETCH_SOURCES and in work records
+ *   name       human-readable name
+ *   missing()  names of settings it still needs (empty array = ready)
+ *   find(q)    Promise<Candidate[]> for a query { doi, arxiv, isbn, title, ... };
+ *              [] when the query has nothing it can search by
+ *   describe?  (file) => Promise<{ name, size, format, contentType }>: what a
+ *              file is, looked up free of charge and only when its turn comes
+ *   links?     async generator (file, { work, pass, allowCredit }) yielding
+ *              { url, headers?, md5?, credit? }, for files whose download URL is
+ *              looked up, signed or spread over mirrors. Without it the file's
+ *              own url is downloaded. Links are tried in order until one downloads.
  *
  *   Candidate = { meta: Meta, files: [File] }
- *   File      = { url?, headers?, md5?, format?, version?, license? } — md5, when
- *               known, is verified after download; other keys are for resolve()
+ *   File      = { url?, headers?, md5?, format?, version?, license?, credit? };
+ *               md5, when known, is verified after download; credit marks files
+ *               that may cost a paid download and are therefore tried last
  *   Meta      = { title, authors: ["Family, Given" | "Given Family"], year, doi,
- *                 isbn: [], arxiv, pmid, pmcid, md5, celex, symbol, type, venue, publisher,
- *                 language, pages, retracted, url }   (all optional)
+ *               isbn: [], arxiv, pmid, pmcid, md5, celex, symbol, type, venue,
+ *               publisher, language, pages, retracted, url }   (all optional)
  *
- * A source returns [] when the query has nothing it can search by. Setup for
- * each source is documented in docs/sources.md.
+ * Errors with isOutage() true (http.js) mean "try again later"; any other error
+ * means the source has nothing usable. Setup per source: docs/sources.md.
  */
 
 import { config } from "../config.js";
@@ -34,12 +40,12 @@ import openalex from "./openalex.js";
 import semanticscholar from "./semanticscholar.js";
 import unods from "./unods.js";
 import unpaywall from "./unpaywall.js";
-import url from "./url.js";
+import web from "./web.js";
 import worldbank from "./worldbank.js";
 import zenodo from "./zenodo.js";
 
 export const SOURCES = Object.fromEntries(
-  [url, crossref, openalex, unpaywall, arxiv, europepmc, semanticscholar, core, hal, zenodo,
+  [web, crossref, openalex, unpaywall, arxiv, europepmc, semanticscholar, core, hal, zenodo,
     worldbank, dspace, unods, cellar, openaire, annas, libgen].map((s) => [s.id, s])
 );
 

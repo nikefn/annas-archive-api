@@ -9,10 +9,7 @@ import { bareDoi } from "./meta.js";
 
 const API = "https://api.semanticscholar.org/graph/v1/paper";
 const FIELDS = "title,authors,year,externalIds,openAccessPdf,venue,publicationTypes";
-const http = client({
-  minIntervalMs: 1100,
-  headers: config.keys.semanticscholar ? { "x-api-key": config.keys.semanticscholar } : {},
-});
+const http = client({ headers: config.keys.semanticscholar ? { "x-api-key": config.keys.semanticscholar } : {} });
 
 export function toCandidate(p) {
   const ids = p.externalIds ?? {};

@@ -1,14 +1,16 @@
 /**
- * Offline parser tests against the saved reference search page. These run
- * without network access by parsing the fixture HTML in test/fixtures.
+ * Parser tests against a saved search page (test/fixtures). The adapter's
+ * routes and credit handling are tested in annas-routes.test.mjs.
  */
+
+import "./env.mjs";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { parseSearchResults } from "../src/sources/annas.js";
+import { parseScidbPage, parseSearchResults, recordInfo } from "../src/sources/annas.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BASE_URL = "https://annas-archive.gd";
@@ -88,4 +90,29 @@ test("year and size are never mistaken for a format", () => {
     null
   );
   assert.equal(formatOf("Spanish [es] · 2006 · 0.4MB"), null);
+});
+
+test("file records give name, size, content type and IPFS ids", () => {
+  const info = recordInfo({
+    file_unified_data: {
+      original_filename_best: "scimag/10.1000/x.pdf",
+      filesize_best: 123456,
+      extension_best: "pdf",
+      content_type_best: "journal_article",
+      ipfs_infos: [{ ipfs_cid: "bafyexample", from: "x" }],
+    },
+  });
+  assert.deepEqual(info, {
+    name: "scimag/10.1000/x.pdf",
+    size: 123456,
+    format: "pdf",
+    contentType: "journal_article",
+    ipfs: ["bafyexample"],
+  });
+});
+
+test("a SciDB page yields the PDF its viewer shows", () => {
+  const page = '<iframe src="/pdfjs/web/viewer.html?file=https%3A%2F%2Ffiles.example%2Fa.pdf"></iframe>';
+  assert.equal(parseScidbPage(page, "https://annas-archive.gl/scidb/10.1/x"), "https://files.example/a.pdf");
+  assert.equal(parseScidbPage("<p>nothing</p>", "https://annas-archive.gl/scidb/10.1/x"), null);
 });

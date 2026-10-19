@@ -35,8 +35,11 @@ export function makePdf(pages, { truncate = false } = {}) {
   return Buffer.from(out, "latin1");
 }
 
-/** An EPUB with the given title, creator and chapter texts. */
-export function makeEpub({ title, creator, chapters }) {
+/**
+ * An EPUB with the given title, creator and chapter texts. `encrypted` lists
+ * archive paths that META-INF/encryption.xml declares as encrypted.
+ */
+export function makeEpub({ title, creator, chapters, encrypted = [] }) {
   const manifest = chapters.map((_, i) => `<item id="c${i}" href="c${i}.xhtml" media-type="application/xhtml+xml"/>`);
   const spine = chapters.map((_, i) => `<itemref idref="c${i}"/>`);
   const files = {
@@ -50,6 +53,11 @@ export function makeEpub({ title, creator, chapters }) {
         `<spine>${spine.join("")}</spine></package>`
     ),
   };
+  if (encrypted.length) {
+    files["META-INF/encryption.xml"] = strToU8(
+      `<encryption>${encrypted.map((uri) => `<EncryptedData><CipherData><CipherReference URI="${uri}"/></CipherData></EncryptedData>`).join("")}</encryption>`
+    );
+  }
   chapters.forEach((text, i) => {
     files[`OEBPS/c${i}.xhtml`] = strToU8(`<html><body><p>${text}</p></body></html>`);
   });

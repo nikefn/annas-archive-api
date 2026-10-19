@@ -1,15 +1,15 @@
 /**
  * DSpace 7+ repositories (REST API): WHO IRIS, World Bank and FAO Open
  * Knowledge, many university and agency repositories. One adapter, any number
- * of instances, listed in DSPACE_REPOSITORIES. The bitstream link needs two
- * extra calls, so it is looked up only when a file is actually tried.
+ * of instances, listed in DSPACE_REPOSITORIES. The bitstream link takes two
+ * more calls, so it is looked up only when the file's turn comes.
  */
 
 import { config } from "../config.js";
 import { client } from "../http.js";
 import { bareDoi, searchTerms, yearOf } from "./meta.js";
 
-const http = client({ minIntervalMs: 500 });
+const http = client();
 const PER_REPOSITORY = 3;
 
 export function toCandidate(item, base) {
@@ -51,18 +51,15 @@ export default {
     return settled.flatMap((r) => (r.status === "fulfilled" ? r.value : []));
   },
 
-  /** First bitstream of the ORIGINAL bundle, with its md5 when the repository reports one. */
-  async resolve({ dspace: { base, uuid } }) {
+  /** The ORIGINAL bundle's first bitstream, with its md5 when the repository reports one. */
+  async *links({ dspace: { base, uuid } }) {
     const bundles = await http.json(`${base}/server/api/core/items/${uuid}/bundles`);
     const original = bundles._embedded?.bundles?.find((b) => b.name === "ORIGINAL");
-    if (!original) throw new Error("item has no files");
+    if (!original) return;
     const list = await http.json(original._links.bitstreams.href);
     const bitstream = list._embedded?.bitstreams?.[0];
-    if (!bitstream) throw new Error("item has no files");
+    if (!bitstream) return;
     const sum = bitstream.checkSum;
-    return {
-      url: bitstream._links.content.href,
-      md5: sum?.checkSumAlgorithm === "MD5" ? sum.value : undefined,
-    };
+    yield { url: bitstream._links.content.href, md5: sum?.checkSumAlgorithm === "MD5" ? sum.value : undefined };
   },
 };

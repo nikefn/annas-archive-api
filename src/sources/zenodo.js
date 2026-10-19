@@ -1,5 +1,5 @@
 /**
- * Zenodo: CERN's open repository — reports, project deliverables, preprints,
+ * Zenodo: CERN's open repository for reports, project deliverables, preprints,
  * posters and datasets. Keyless; 30 requests per minute. Files carry md5 sums.
  */
 
@@ -8,7 +8,7 @@ import { bareDoi, searchTerms, yearOf } from "./meta.js";
 
 const API = "https://zenodo.org/api/records";
 const DOCUMENT = /\.(pdf|epub|djvu)$/i;
-const http = client({ minIntervalMs: 2100 });
+const http = client();
 
 export function toCandidate(r) {
   const m = r.metadata ?? {};

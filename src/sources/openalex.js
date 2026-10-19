@@ -9,7 +9,7 @@ import { client } from "../http.js";
 import { bareDoi, pageCount, searchTerms } from "./meta.js";
 
 const API = "https://api.openalex.org/works";
-const http = client({ minIntervalMs: 100 });
+const http = client();
 
 export function toCandidate(w) {
   const locations = [w.best_oa_location, ...(w.locations ?? [])].filter((l) => l?.pdf_url);

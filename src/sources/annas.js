@@ -1,15 +1,23 @@
 /**
- * Anna's Archive: shadow-library search engine (books, papers, magazines).
+ * Anna's Archive: shadow-library search engine for books, papers and magazines.
  * Opt-in source; needs a member account secret key (ANNAS_KEY).
  *
- *  - parseSearchResults: scrape the static search HTML into result objects.
- *  - search: fetch the search page signed in, parse it, and fan out concurrent
- *    download-count lookups (those counts are loaded client-side by the real
- *    site from /dyn/md5/inline_info/<md5>, not present in the search HTML).
- *  - fastDownload: resolve an md5 to a download URL with the member key.
- *  - default export: the litfetch source adapter built on the three above.
+ * What costs what:
+ *   free    search, the file record (/db/...json, with name, size, content type,
+ *           IPFS ids), SciDB pages for DOIs, IPFS gateways
+ *   credit  a fast-download link (/dyn/api/fast_download.json); the daily quota
+ *           is tracked in <library>/_state/annas.json
+ * Free routes are tried first. Credited links are capped per work and pass
+ * (ANNAS_MAX_PER_WORK), and none is requested while the quota is used up.
  *
- * The web UI in server/ uses the same functions with a per-request key.
+ * Searches and records need a signed-in session: Anna's Archive sends anonymous
+ * /search and /md5/ requests through a DDoS-Guard check that fetch cannot pass.
+ * The key is traded for a session cookie via POST /account/, and only that
+ * cookie is cached, in memory, under a hash of the key. An expired session gets
+ * a redirect loop with check=1, which http.js reports as a bot check; one fresh
+ * login is tried before giving up.
+ *
+ * The web UI in server/ uses search() and fastDownload() with a per-request key.
  */
 
 import { createHash } from "node:crypto";
@@ -17,51 +25,37 @@ import { createHash } from "node:crypto";
 import { load } from "cheerio";
 
 import { config } from "../config.js";
-import { client } from "../http.js";
+import { HttpError, client, hostOf, isOutage, mirrorSet } from "../http.js";
+import * as store from "../store.js";
 
-export const BASE_URL = config.annasBaseUrl;
-
-/**
- * Resolve the upstream base URL for a given TLD. Anna's Archive runs the same
- * site across several mirrors that differ only in TLD (.gd, .gs, .se, …), so a
- * caller can pass `tld: "gs"` to target https://annas-archive.gs. The base
- * host (everything but the final label) is taken from BASE_URL so an overridden
- * ANNAS_BASE_URL still works. Unknown/invalid TLDs fall back to BASE_URL.
- */
-export function resolveBaseUrl(tld) {
-  if (!tld) return BASE_URL;
-  const safe = String(tld).trim().replace(/^\.+/, "").toLowerCase();
-  if (!/^[a-z]{2,}$/.test(safe)) return BASE_URL;
-  const url = new URL(BASE_URL);
-  url.hostname = url.hostname.replace(/\.[^.]+$/, `.${safe}`);
-  return url.origin;
-}
-
-// http.js sends a browser-like UA, which keeps DDoS-Guard from serving a challenge page.
 const HEADERS = { "Accept-Language": "en-US,en;q=0.9" };
-const http = client();
+const http = client({ headers: HEADERS });
+export const mirrors = mirrorSet(config.annasMirrors.map((m) => m.replace(/\/$/, "")));
 
-// Cap on simultaneous inline_info requests so we stay polite to the origin.
-const DOWNLOAD_CONCURRENCY = 10;
-
-// Anna's Archive pushes unauthenticated requests for /search and /md5/ through a
-// DDoS-Guard JS challenge that a plain fetch cannot solve; a signed-in session
-// skips it. We trade the account secret key (the same key /api/download uses)
-// for a session cookie and cache only that cookie, keyed by a hash of the key —
-// the key itself is never retained. The TTL is an optimisation; expiry is really
-// handled by re-logging in when a challenge is detected.
+const DOWNLOAD_COUNT_CONCURRENCY = 10; // inline_info lookups in flight; a politeness cap
 const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_REDIRECTS = 5;
+const GATEWAYS_PER_FILE = 3;
+const HOUR = 3_600_000;
 
-/** sha256(key + mirror) -> { cookie, at }. In-memory only, never persisted. */
+/** sha256(key + mirror) -> { cookie, at }. In memory only, never persisted. */
 const sessions = new Map();
 
-/** Raised when the upstream site cannot be reached or parsed. */
+/** Raised when the upstream site answers but not with what was asked for. */
 export class AnnasArchiveError extends Error {
-  constructor(message) {
+  constructor(message, status) {
     super(message);
     this.name = "AnnasArchiveError";
+    this.status = status;
   }
+}
+
+/** The configured mirror whose domain ends in `.tld`; anything else is refused. */
+export function mirrorFor(tld) {
+  const want = String(tld).trim().replace(/^\.+/, "").toLowerCase();
+  const base = mirrors.ordered().find((m) => hostOf(m).endsWith(`.${want}`));
+  if (!want || !base) throw new AnnasArchiveError(`unknown mirror "${tld}"; allowed: ${mirrors.ordered().map(hostOf).join(", ")}`, 400);
+  return base;
 }
 
 function clean(text) {
@@ -71,13 +65,13 @@ function clean(text) {
 /**
  * Pull the file format out of the metadata line, e.g.
  *   "English [en] · EPUB · 0.4MB · 2014 · 📕 Book (fiction) · 🚀/lgli/..."
- * Format is the short token before the file size (epub/pdf/azw3/fb2/…). We
+ * Format is the short token before the file size (epub, pdf, azw3, fb2, ...). We
  * scan segments rather than hard-coding an index so an extra leading field
  * doesn't break it.
  *
  * Digits are allowed after the first character so alphanumeric extensions
- * (fb2, azw3, mp3) are recognised, but the token must *start* with a letter —
- * that is what keeps the year ("2014") and the size ("0.4MB") from matching.
+ * (fb2, azw3, mp3) are recognised, but the token must start with a letter,
+ * which keeps the year ("2014") and the size ("0.4MB") from matching.
  */
 function extractFormat(metaText) {
   for (const seg of metaText.split("·").map((s) => s.trim())) {
@@ -114,18 +108,18 @@ function findMetaDiv($, card) {
 }
 
 /** Extract all search results from a search page's HTML. */
-export function parseSearchResults(html, baseUrl = BASE_URL) {
+export function parseSearchResults(html, baseUrl = config.annasMirrors[0]) {
   const $ = load(html);
   const base = baseUrl.replace(/\/$/, "");
   const results = [];
 
   // Each result's title is an anchor carrying the `js-vim-focus` class and
-  // pointing at /md5/<hash> — the most stable anchor on the card.
+  // pointing at /md5/<hash>, the most stable anchor on the card.
   $("a.js-vim-focus[href^='/md5/']").each((_, el) => {
     const titleLink = $(el);
     const href = titleLink.attr("href") || "";
     const md5 = href.split("/").pop();
-    // Drop anything that isn't a real 32-hex md5 — the value is mirror-controlled
+    // Drop anything that isn't a real 32-hex md5: the value is mirror-controlled
     // and flows into a JS-string sink in the frontend download button.
     if (!/^[a-f0-9]{32}$/.test(md5)) return;
     const title = clean(titleLink.text());
@@ -183,105 +177,78 @@ export function parseSearchResults(html, baseUrl = BASE_URL) {
   return results;
 }
 
-function sessionId(key, baseUrl) {
-  return createHash("sha256").update(`${key}\n${baseUrl}`).digest("hex");
-}
+const sessionId = (key, baseUrl) => createHash("sha256").update(`${key}\n${baseUrl}`).digest("hex");
 
 /**
- * Exchange the account secret key for a session cookie. Anna's Archive
- * authenticates with a single form field (`key`) on POST /account/ and replies
- * with an `aa_account_id2` cookie; anything starting `aa_` is session state.
+ * Exchange the account secret key for a session cookie. Anna's Archive takes a
+ * single form field (`key`) on POST /account/ and replies with an
+ * `aa_account_id2` cookie; anything starting `aa_` is session state.
  */
 async function login(baseUrl, key) {
-  let resp;
-  try {
-    resp = await http.request(`${baseUrl}/account/`, {
-      method: "POST",
-      headers: { ...HEADERS, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ key }).toString(),
-      redirect: "manual",
-    });
-  } catch (err) {
-    throw new AnnasArchiveError(`Failed to reach Anna's Archive: ${err.message}`);
-  }
-
-  const cookie = resp.headers.getSetCookie()
+  const resp = await http.request(`${baseUrl}/account/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ key }).toString(),
+    redirect: "manual",
+  });
+  await resp.body?.cancel();
+  const cookie = resp.headers
+    .getSetCookie()
     .map((c) => c.split(";")[0].trim())
     .filter((c) => c.startsWith("aa_") && c.includes("="))
     .join("; ");
-
-  if (!cookie) {
-    // A bad key still returns 200 with the login form, just no session cookie.
-    const err = new AnnasArchiveError(
-      "Anna's Archive rejected the download key — check it in Settings."
-    );
-    err.status = 401;
-    throw err;
-  }
+  // A bad key still returns 200 with the login form, just no session cookie.
+  if (!cookie) throw new AnnasArchiveError("Anna's Archive rejected the key; check it in Settings.", 401);
   return cookie;
 }
 
-/** Cached login. `force` discards a stale entry after a challenge. */
-async function ensureSession(baseUrl, key, force = false) {
+async function session(baseUrl, key, fresh = false) {
   const id = sessionId(key, baseUrl);
   const hit = sessions.get(id);
-  if (!force && hit && Date.now() - hit.at < SESSION_TTL_MS) return hit.cookie;
+  if (!fresh && hit && Date.now() - hit.at < SESSION_TTL_MS) return hit.cookie;
   const cookie = await login(baseUrl, key);
   sessions.set(id, { cookie, at: Date.now() });
   return cookie;
 }
 
-/**
- * A challenge shows up two ways: a 403 straight from DDoS-Guard, or a redirect
- * to the same path with `check=1`. The latter is what an expired session gets,
- * and following it loops until fetch dies with "redirect count exceeded" — so
- * we drive redirects manually and name the condition instead.
- */
-function isChallenge(resp) {
-  if (resp.status === 403 && /ddos-guard/i.test(resp.headers.get("server") || "")) {
-    return true;
-  }
-  const loc = resp.headers.get("location") || "";
-  return resp.status >= 300 && resp.status < 400 && /[?&]check=1/.test(loc);
-}
-
-function challengeError() {
-  const err = new AnnasArchiveError(
-    "Anna's Archive served a bot check instead of results. Add your download " +
-      "key in Settings — signed-in searches skip the check."
-  );
-  err.code = "CHALLENGE";
-  err.status = 401;
-  return err;
-}
-
-/** Follow redirects by hand so a `check=1` hop is reported, not followed. */
-async function fetchFollowing(url, options) {
+/** GET following redirects by hand, so a check=1 hop is reported, not looped on. */
+async function getFollowing(url, headers) {
   let current = new URL(url);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const resp = await http.request(current, { ...options, redirect: "manual" });
-    if (isChallenge(resp)) throw challengeError();
-    if (resp.status < 300 || resp.status >= 400) return resp;
+    const resp = await http.request(current, { headers, redirect: "manual" });
     const loc = resp.headers.get("location");
-    if (!loc) return resp;
+    if (resp.status < 300 || resp.status >= 400 || !loc) return { resp, url: current };
+    await resp.body?.cancel();
     current = new URL(loc, current);
   }
-  throw new AnnasArchiveError("Too many redirects from Anna's Archive.");
+  throw new AnnasArchiveError("too many redirects from Anna's Archive", 502);
 }
 
-/**
- * Populate result.downloads from the inline_info endpoint. Failures are
- * swallowed and leave downloads as null so one bad lookup never sinks the
- * whole response.
- */
-async function fetchDownloads(result, baseUrl = BASE_URL) {
+/** A signed-in GET (anonymous without a key). A bot check gets one fresh login. */
+async function signedIn(baseUrl, path, key) {
+  for (const fresh of [false, true]) {
+    const headers = key ? { Cookie: await session(baseUrl, key, fresh) } : {};
+    try {
+      return await getFollowing(`${baseUrl}${path}`, headers);
+    } catch (err) {
+      if (err.code !== "CHALLENGE" || !key || fresh) throw err;
+    }
+  }
+}
+
+async function text(baseUrl, path, key) {
+  const { resp, url } = await signedIn(baseUrl, path, key);
+  if (!resp.ok) {
+    await resp.body?.cancel();
+    throw new HttpError(`HTTP ${resp.status} (${hostOf(baseUrl)})`, resp.status);
+  }
+  return { body: await resp.text(), url };
+}
+
+/** Fill result.downloads from inline_info; a failed lookup leaves null. */
+async function fetchDownloads(result, baseUrl) {
   try {
-    const resp = await http.request(
-      `${baseUrl}/dyn/md5/inline_info/${result.md5}`,
-      { headers: { ...HEADERS, Accept: "text/css" } }
-    );
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = await resp.json();
+    const data = await http.json(`${baseUrl}/dyn/md5/inline_info/${result.md5}`, { headers: { Accept: "text/css" } });
     const n = parseInt(data.downloads_total, 10);
     result.downloads = Number.isNaN(n) ? null : n;
   } catch {
@@ -289,128 +256,161 @@ async function fetchDownloads(result, baseUrl = BASE_URL) {
   }
 }
 
-/** Run `worker` over `items` with at most `limit` in flight at once. */
 async function withConcurrency(items, limit, worker) {
   const queue = items.slice();
-  const runners = Array.from(
-    { length: Math.min(limit, queue.length) },
-    async () => {
+  await Promise.all(
+    Array.from({ length: Math.min(limit, queue.length) }, async () => {
       while (queue.length) await worker(queue.shift());
-    }
+    })
   );
-  await Promise.all(runners);
 }
 
 /**
- * Fetch one search page's HTML, signed in when a key is given. `force` skips
- * the session cache so a stale cookie can be replaced.
+ * Search and return up to `limit` results, with download counts unless
+ * `includeDownloads` is false. Without `baseUrl` the mirrors are rotated.
  */
-async function fetchSearchPage(url, baseUrl, key, force = false) {
-  const headers = { ...HEADERS };
-  if (key) headers.Cookie = await ensureSession(baseUrl, key, force);
-
-  let resp;
-  try {
-    resp = await fetchFollowing(url, { headers });
-  } catch (err) {
-    if (err instanceof AnnasArchiveError) throw err;
-    throw new AnnasArchiveError(`Failed to reach Anna's Archive: ${err.message}`);
-  }
-  if (!resp.ok) {
-    throw new AnnasArchiveError(`Failed to reach Anna's Archive: HTTP ${resp.status}`);
-  }
-  return resp.text();
+export async function search(query, { limit = 20, includeDownloads = true, key, baseUrl } = {}) {
+  const once = async (base) => {
+    const { body } = await text(base, `/search?${new URLSearchParams({ q: query })}`, key);
+    const results = parseSearchResults(body, base).slice(0, limit);
+    if (includeDownloads) await withConcurrency(results, DOWNLOAD_COUNT_CONCURRENCY, (r) => fetchDownloads(r, base));
+    return results;
+  };
+  return baseUrl ? once(baseUrl) : mirrors.run(once);
 }
 
 /**
- * Search Anna's Archive and return up to `limit` enriched results. Fetches the
- * search page, parses it, trims to `limit`, and (optionally) fans out
- * concurrent requests to fill in download counts.
- *
- * Pass `key` (the account secret key) to search as a signed-in member, which
- * is what keeps the upstream from answering with a DDoS-Guard challenge.
+ * One fast-download link for an md5, spending a credit of the key's account.
+ * The key has to go in the query string here; that URL is never stored or logged.
  */
-export async function search(
-  query,
-  { limit = 20, includeDownloads = true, tld, key } = {}
-) {
-  const baseUrl = resolveBaseUrl(tld);
-  const url = new URL(`${baseUrl}/search`);
-  url.searchParams.set("q", query);
+export async function fastDownload(md5, key, { baseUrl } = {}) {
+  const once = async (base) => {
+    const resp = await http.request(`${base}/dyn/api/fast_download.json?${new URLSearchParams({ md5, key })}`);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new AnnasArchiveError(data.error || `HTTP ${resp.status}`, resp.status);
+    return data;
+  };
+  return baseUrl ? once(baseUrl) : mirrors.run(once);
+}
 
-  let html;
-  try {
-    html = await fetchSearchPage(url, baseUrl, key);
-  } catch (err) {
-    // A cached session that has expired looks exactly like being logged out.
-    // Log in again once before giving up.
-    if (err.code === "CHALLENGE" && key) {
-      html = await fetchSearchPage(url, baseUrl, key, true);
-    } else {
+/** Name, size, format, content type and IPFS ids from a file record. */
+export function recordInfo(record) {
+  const u = record?.file_unified_data ?? {};
+  return {
+    name: u.original_filename_best || undefined,
+    size: Number(u.filesize_best) || undefined,
+    format: u.extension_best || undefined,
+    contentType: u.content_type_best || undefined,
+    ipfs: (u.ipfs_infos ?? []).map((i) => i.ipfs_cid).filter(Boolean),
+  };
+}
+
+/** The PDF a SciDB page shows (its viewer's file= or the download link), or null. */
+export function parseScidbPage(html, pageUrl) {
+  const $ = load(html);
+  const viewer = $("iframe[src*='viewer.html'], a[href*='viewer.html']").first();
+  const viewerUrl = viewer.attr("src") ?? viewer.attr("href");
+  const file = viewerUrl ? new URL(viewerUrl, pageUrl).searchParams.get("file") : $("a[href$='.pdf']").attr("href");
+  return file ? new URL(file, pageUrl).toString() : null;
+}
+
+const records = new Map();
+
+async function record(md5) {
+  if (!records.has(md5)) {
+    const info = await mirrors.run(async (base) => {
+      const { body } = await text(base, `/db/aarecord_elasticsearch/md5:${md5}.json`, config.keys.annas);
+      return recordInfo(JSON.parse(body));
+    });
+    records.set(md5, info);
+  }
+  return records.get(md5);
+}
+
+/** Download credits of ANNAS_KEY's account, persisted between runs. */
+const credits = {
+  async check() {
+    const s = await store.readState("annas");
+    if (s?.left === 0 && Date.parse(s.refillAt) > Date.now()) {
+      const err = new HttpError(`no fast-download credits until ${s.refillAt}`, 0, "NO_CREDITS");
+      err.retryAt = s.refillAt;
       throw err;
     }
-  }
+  },
+  async note(left) {
+    const refillAt = left > 0 ? null : new Date(Date.now() + config.annasWindowHours * HOUR).toISOString();
+    await store.writeState("annas", { left, refillAt, updated: new Date().toISOString() });
+  },
+};
 
-  const results = parseSearchResults(html, baseUrl).slice(0, limit);
-
-  if (includeDownloads && results.length) {
-    await withConcurrency(results, DOWNLOAD_CONCURRENCY, (r) =>
-      fetchDownloads(r, baseUrl)
-    );
-  }
-
-  return results;
+async function creditedLink(md5) {
+  const data = await mirrors.run(async (base) => {
+    try {
+      return await fastDownload(md5, config.keys.annas, { baseUrl: base });
+    } catch (err) {
+      if (err.status !== 429) throw err;
+      await credits.note(0);
+      await credits.check();
+      throw err;
+    }
+  });
+  const left = data.account_fast_download_info?.downloads_left;
+  if (Number.isInteger(left)) await credits.note(left);
+  if (!data.download_url) throw new AnnasArchiveError(data.error || "no download_url", 502);
+  return data.download_url;
 }
 
-/**
- * Proxy an Anna's Archive fast-download request. The key belongs to the
- * caller (member account) and is never persisted server-side.
- */
-export async function fastDownload(md5, key, { tld } = {}) {
-  const baseUrl = resolveBaseUrl(tld);
-  const url = new URL(`${baseUrl}/dyn/api/fast_download.json`);
-  url.searchParams.set("md5", md5);
-  url.searchParams.set("key", key);
-
-  let resp;
-  try {
-    resp = await http.request(url, { headers: HEADERS });
-  } catch (err) {
-    throw new AnnasArchiveError(`Failed to reach Anna's Archive: ${err.message}`);
-  }
-
-  const data = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const err = new AnnasArchiveError(data.error || `HTTP ${resp.status}`);
-    err.status = resp.status;
-    throw err;
-  }
-  return data;
-}
-
-/**
- * Source adapter. Searches by DOI, ISBN or title (an md5 is used as is), then
- * resolves each md5 to a signed fast-download URL just before download.
- */
+/** Source adapter. */
 export default {
   id: "annas",
   name: "Anna's Archive",
   missing: () => (config.keys.annas ? [] : ["ANNAS_KEY"]),
 
   async find(q) {
-    if (q.md5) return [{ meta: { md5: q.md5 }, files: [{ md5: q.md5 }] }];
+    if (q.md5) return [{ meta: { md5: q.md5 }, files: [{ md5: q.md5, credit: true }] }];
     const term = q.doi || q.isbn || q.title;
     if (!term) return [];
     const results = await search(term, { limit: 10, includeDownloads: false, key: config.keys.annas });
-    return results.map((r) => ({
+    const found = results.map((r) => ({
       meta: { title: r.title, authors: r.author ? [r.author] : [], md5: r.md5 },
-      files: [{ md5: r.md5, format: r.format }],
+      files: [{ md5: r.md5, format: r.format, credit: true }],
     }));
+    return q.doi ? [{ meta: { doi: q.doi }, files: [{ scidb: q.doi }] }, ...found] : found;
   },
 
-  async resolve(file) {
-    const data = await fastDownload(file.md5, config.keys.annas);
-    if (!data.download_url) throw new AnnasArchiveError(data.error || "no download_url");
-    return { url: data.download_url };
+  /** The free file record; skipped while credits are used up, since no link could follow. */
+  async describe(file) {
+    if (!file.md5) return {};
+    await credits.check();
+    return record(file.md5);
+  },
+
+  async *links(file, { work, pass, allowCredit = true }) {
+    const key = config.keys.annas;
+    if (file.scidb) {
+      const url = await mirrors.run(async (base) => {
+        const page = await text(base, `/scidb/${file.scidb}`, key);
+        return new URL(page.url).pathname.startsWith("/scidb/") ? parseScidbPage(page.body, page.url.toString()) : null;
+      });
+      if (url) yield { url };
+      return;
+    }
+    await credits.check();
+    // Without a readable record there are no gateway routes, but the credited link still works.
+    const info = file.ipfs ? file : await record(file.md5).catch((err) => {
+      if (isOutage(err)) throw err;
+      return { ipfs: [] };
+    });
+    const failures = (g) => pass.failures.get(hostOf(g)) ?? 0;
+    const gateways = [...config.ipfsGateways].sort((a, b) => failures(a) - failures(b)).slice(0, GATEWAYS_PER_FILE);
+    for (const cid of info.ipfs.slice(0, 1)) {
+      for (const gateway of gateways) yield { url: `${gateway.replace(/\/$/, "")}/ipfs/${cid}`, md5: file.md5 };
+    }
+    if (!allowCredit) return;
+    const spent = pass.spent.get(work.id) ?? 0;
+    if (spent >= config.annasMaxPerWork) return;
+    await credits.check();
+    pass.spent.set(work.id, spent + 1);
+    yield { url: await creditedLink(file.md5), md5: file.md5, credit: true };
   },
 };

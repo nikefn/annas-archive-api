@@ -1,5 +1,5 @@
 /**
- * HAL: French national open archive — articles, theses, research reports and
+ * HAL: French national open archive of articles, theses, research reports and
  * working papers from French universities and research bodies. Keyless.
  */
 
@@ -8,7 +8,7 @@ import { bareDoi, searchTerms } from "./meta.js";
 
 const API = "https://api.archives-ouvertes.fr/search/";
 const FIELDS = "halId_s,title_s,authFullName_s,producedDateY_i,doiId_s,isbn_s,docType_s,language_s,fileMain_s,uri_s";
-const http = client({ minIntervalMs: 500 });
+const http = client();
 
 export function toCandidate(d) {
   return {

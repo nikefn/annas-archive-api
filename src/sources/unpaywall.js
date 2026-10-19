@@ -8,7 +8,7 @@ import { client } from "../http.js";
 import { bareDoi, personName } from "./meta.js";
 
 const API = "https://api.unpaywall.org/v2";
-const http = client({ minIntervalMs: 100 });
+const http = client();
 
 export function toCandidate(r) {
   const locations = [r.best_oa_location, ...(r.oa_locations ?? [])].filter((l) => l?.url_for_pdf);

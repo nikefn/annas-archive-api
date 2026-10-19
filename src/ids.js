@@ -29,7 +29,7 @@ export function normaliseId(kind, value) {
   return v;
 }
 
-/** One line of input -> query object, e.g. { doi: "10.1/x" } or { title: "…" }. */
+/** One line of input -> query object, e.g. { doi: "10.1/x" } or { title: "..." }. */
 export function parseInput(line) {
   const text = String(line).trim();
   for (const [kind, re] of PATTERNS) {

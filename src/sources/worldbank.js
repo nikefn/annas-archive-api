@@ -8,7 +8,7 @@ import { searchTerms, yearOf } from "./meta.js";
 
 const API = "https://search.worldbank.org/api/v3/wds";
 const FIELDS = "id,display_title,docdt,pdfurl,docty,authors,lang,repnb";
-const http = client({ minIntervalMs: 500 });
+const http = client();
 
 export function parseResponse(data) {
   return Object.values(data.documents ?? {})

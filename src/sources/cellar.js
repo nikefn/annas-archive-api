@@ -9,7 +9,7 @@ import { client } from "../http.js";
 import { yearOf } from "./meta.js";
 
 const SPARQL = "https://publications.europa.eu/webapi/rdf/sparql";
-const http = client({ minIntervalMs: 1000 });
+const http = client();
 
 const titleQuery = (celex) => `
 PREFIX cdm: <http://publications.europa.eu/ontology/cdm#>

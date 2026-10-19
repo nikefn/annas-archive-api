@@ -9,7 +9,7 @@ import { posix } from "node:path";
 import { load } from "cheerio";
 import { unzipSync, strFromU8 } from "fflate";
 
-/** Formats litfetch keeps. Anything else (HTML error pages, unknown blobs) fails. */
+/** Formats litfetch keeps. Anything else (HTML or JSON error pages, unknown blobs) fails. */
 export const ACCEPTED_FORMATS = ["pdf", "epub", "djvu", "mobi"];
 
 const PAGES_READ = 10;
@@ -24,12 +24,13 @@ export function detectFormat(head) {
     return ascii.slice(30, 58) === "mimetypeapplication/epub+zip" ? "epub" : "zip";
   }
   if (/^\s*(<!doctype html|<html|<\?xml)/i.test(ascii)) return "html";
+  if (/^\s*[{[]/.test(ascii)) return "json";
   return "unknown";
 }
 
 /**
  * Open a file and extract what the checks need:
- *   { format, opened, error?, pages?, pageTexts: string[], title?, authors? }
+ *   { format, opened, error?, pages?, pageTexts: string[], title?, authors?, drm? }
  * `pageTexts` is per page for PDF and per spine document for EPUB.
  */
 export async function readDocument(path) {
@@ -72,9 +73,25 @@ async function readPdf(buf) {
   }
 }
 
+const FONT = /\.(ttf|otf|woff2?)$/i;
+
 function readEpub(buf) {
+  // The end-of-central-directory record sits in the last 64 KB; without it the archive was cut off.
+  if (!buf.subarray(-65_557).includes(Buffer.from("PK\x05\x06", "latin1"))) {
+    throw new Error("truncated: no end of ZIP directory");
+  }
   const u8 = new Uint8Array(buf);
   const pick = (names) => unzipSync(u8, { filter: (f) => names.includes(f.name) });
+
+  // DRM: rights.xml, or encryption.xml covering more than font obfuscation.
+  const rights = pick(["META-INF/rights.xml", "META-INF/encryption.xml"]);
+  const encrypted = rights["META-INF/encryption.xml"]
+    ? load(strFromU8(rights["META-INF/encryption.xml"]), { xmlMode: true })("CipherReference, enc\\:CipherReference")
+        .map((_, el) => el.attribs.URI)
+        .get()
+        .filter((uri) => !FONT.test(uri))
+    : [];
+  const drm = Boolean(rights["META-INF/rights.xml"]) || encrypted.length > 0;
 
   const container = pick(["META-INF/container.xml"])["META-INF/container.xml"];
   if (!container) throw new Error("no META-INF/container.xml");
@@ -99,6 +116,7 @@ function readEpub(buf) {
 
   return {
     opened: true,
+    drm,
     pageTexts,
     title: $("dc\\:title, title").first().text().trim() || undefined,
     authors: $("dc\\:creator, creator").map((_, el) => $(el).text().trim()).get(),

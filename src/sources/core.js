@@ -1,6 +1,6 @@
 /**
  * CORE: full texts aggregated from thousands of institutional and subject
- * repositories — strong for theses and reports. Works without a key at
+ * repositories, strong for theses and reports. Works without a key at
  * 5 requests per 10 seconds; a free key raises the limit.
  */
 
@@ -9,10 +9,7 @@ import { client } from "../http.js";
 import { bareDoi, searchTerms, yearOf } from "./meta.js";
 
 const API = "https://api.core.ac.uk/v3/search/works";
-const http = client({
-  minIntervalMs: config.keys.core ? 1000 : 2000,
-  headers: config.keys.core ? { Authorization: `Bearer ${config.keys.core}` } : {},
-});
+const http = client({ headers: config.keys.core ? { Authorization: `Bearer ${config.keys.core}` } : {} });
 
 export function toCandidate(w) {
   return {

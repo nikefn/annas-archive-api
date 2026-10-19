@@ -1,80 +1,97 @@
-# litfetch — agent guide
+# litfetch: agent guide
 
-Queue → find → download → verify literature from open-access, grey-literature
+Queue, find, download and verify literature from open-access, grey-literature
 and opt-in shadow-library sources. Node 22.13+, ESM, no build step.
 
 ## Commands
 
 ```bash
 npm install
-npm test                         # offline: no network, no keys
+npm test                         # offline; the suite fails if anything leaves 127.0.0.1
 node src/cli.js <command>        # or `npm link` once, then `litfetch <command>`
-npm run ui                       # web UI at http://localhost:3000
+node src/cli.js verify           # library invariants
+npm run ui                       # web UI at http://127.0.0.1:3000
 ```
 
 ## Map
 
 ```
-src/config.js        every setting (env / .env) — nothing else reads process.env
-src/http.js          every network request: UA, timeout, retries, per-source spacing
-src/ids.js           input line → query; query → work id; slugs
-src/text.js          normalise / similarity — the one definition of "matches"
-src/store.js         library on disk; work.json is the single source of truth
-src/pipeline.js      gather → merge → download → check → keep best
-src/download.js      stream to disk with md5 + sha256, size cap
-src/checks/rules.js  the quality standard (all checks, thresholds, verdict rule)
-src/checks/file.js   format detection by bytes; PDF/EPUB text extraction
-src/checks/llm.js    optional model triage of uncertain identity checks
-src/sources/*.js     one adapter per source; interface in sources/index.js
-src/export.js        RIS export (attaches files in reference managers)
+src/config.js        every setting (env / .env) and the per-host pace table; nothing else reads process.env
+src/http.js          every network request: UA, header timeout, retries, pacing, bot-check
+                     detection, isOutage(), mirror rotation
+src/download.js      stream to disk with md5 + sha256; stall, rate, total and size limits
+src/ids.js           input line -> query; query -> work id; slugs
+src/text.js          normalise, similarity, titleMatch (tiers, volumes), language detection
+src/rank.js          work kind; order of candidate files; excerpt signals
+src/store.js         library on disk (work.json per work, _replaced/, _state/), git guard
+src/pipeline.js      gather -> merge -> try files -> keep best -> settle status and next try
+src/checks/rules.js  the quality standard: every check, threshold and the verdict rule
+src/checks/file.js   format by bytes; PDF and EPUB reading (text, DRM, truncation)
+src/checks/llm.js    opt-in model triage of uncertain identity checks
+src/sources/*.js     one adapter per source; the interface is documented in sources/index.js
+src/imports.js       BibTeX, RIS, TSV and plain lists -> inputs with hints
+src/audit.js         verify (invariants) and stats (evaluation metrics)
+src/export.js        RIS export
 src/cli.js           commands
-server/              web UI (search Anna's Archive, download, queue)
-test/                offline tests; documents are generated, not stored
-docs/sources.md      every source: what it holds, credentials, limits
-library/             content (git-ignored), never code
+server/              web UI: search Anna's Archive, download, queue
+test/                offline tests; documents generated in memory, sites stood in for by local servers
+docs/sources.md      every source: holdings, credentials, limits
+docs/eval.md         how changes are evaluated
+eval/set.tsv         benchmark works
 ```
+
+The library (default `~/litfetch-library`) holds content only and is never
+inside the repository.
 
 ## Invariants
 
-- Code and content stay apart: nothing under `library/` is code; nothing in the repo is content.
-- A file's format is decided by its bytes (`detectFormat`), never by URL or Content-Type.
-- Every downloaded file passes through `checks/rules.js`; status follows from the verdict only.
-- Keys are read from config only, never logged, and redacted from URLs saved in records.
-  The web server never uses env keys: it takes the Anna's Archive key per request
-  (`Authorization: Bearer`) and keeps only a hashed-key session cookie in memory.
-- Network-dependent tests are not allowed. Adapters export pure mappers
-  (`toCandidate`, `parse…`) and those are what the tests exercise.
-- Public repository: no personal data, names, emails or local paths in code, docs or fixtures.
+- A kept file is never deleted. It is replaced only by a strictly better file
+  (pass beats warn) and then moved to `_replaced/`.
+- A file's format comes from its bytes, never from its URL or Content-Type.
+- Every downloaded file goes through `checks/rules.js`; the status follows from
+  the verdict and from `settle()` in `pipeline.js`.
+- An outage (`isOutage()`: 5xx, 429, timeouts, network errors, bot checks, no
+  credits) never counts as a try.
+- Keys come from config only and are never logged or stored. Records store a
+  file's listed URL, never a link that `links()` produced (those can be signed).
+  The web server takes the Anna's Archive key per request and never uses env keys.
+- No test may need the network.
+- Public repository: no personal data, names, emails or local paths in code,
+  docs, fixtures or commits.
 
 ## Adding a source
 
-1. `src/sources/<id>.js`: default export `{ id, name, missing(), find(q), resolve? }`
-   (contract in `src/sources/index.js`). Use `client({ minIntervalMs })` from `http.js`
-   at the source's published rate limit. Return `[]` for queries it cannot serve.
-2. Register it in `src/sources/index.js`; add it to `DEFAULT_SOURCES` in
-   `src/config.js` only if it is open and keyless-or-free.
-3. New setting → `src/config.js` + `.env.example`.
-4. A test for its mapper in `test/sources.test.mjs`; a row in `docs/sources.md`.
+1. `src/sources/<id>.js`: default export `{ id, name, missing(), find(q) }`,
+   plus `links()` when download URLs must be looked up or signed, and
+   `describe()` when file details cost a separate free call (contract in
+   `src/sources/index.js`). Mark files that may spend a paid credit with
+   `credit: true`.
+2. Register it in `src/sources/index.js`. Add it to `DEFAULT_SOURCES` in
+   `src/config.js` only if it is open and free; add its host to the pace table
+   if its rate limit is stricter than one request per second.
+3. Export the response mappers and test them in `test/sources.test.mjs`.
+4. Document it in `docs/sources.md`; new settings go in `src/config.js` and
+   `.env.example`.
 
-## When something changes, update
+## Keep in step
 
-| Change                         | Also update                         |
-| ------------------------------ | ----------------------------------- |
-| check added/removed/threshold  | README "Quality checks" table       |
-| setting added/renamed          | `.env.example`                      |
-| source added/changed access    | `docs/sources.md`                   |
-| record shape (`work.json`)     | header comment in `src/store.js`    |
+| Change | Also update |
+| --- | --- |
+| a check, threshold or status | README tables |
+| a setting | `.env.example` |
+| a source or its access | `docs/sources.md` |
+| a `work.json` field | header comment of `src/store.js` |
+| a metric | `docs/eval.md` and `src/audit.js` |
 
 ## Model triage
 
-For agents working on this repo:
+For agents working on this repository:
 
-| Model  | Use for |
-| ------ | ------- |
-| Haiku  | Mechanical edits: renames, docs wording, mapper tweaks from a known response shape, running tests |
-| Sonnet | A new source adapter, bug fixes, test additions, CLI commands |
-| Opus   | Changes to `checks/rules.js`, `pipeline.js` or `store.js`, record-shape changes, security-sensitive code (keys, server) |
+| Model | Use for |
+| --- | --- |
+| Haiku | mechanical edits: renames, wording, a mapper fix for a known response shape, running tests |
+| Sonnet | a new source adapter, bug fixes, tests, CLI commands |
+| Opus | `checks/rules.js`, `pipeline.js`, `store.js`, `http.js`, record-shape changes, keys and the server |
 
-In the pipeline, `LITFETCH_LLM_MODELS` applies the same ladder: the cheapest model
-answers first, "unsure" escalates. It only runs when the identity check warned
-and `ANTHROPIC_API_KEY` is set.
+Inside the pipeline the same ladder applies through `LITFETCH_LLM_MODELS`
+(opt-in): the cheapest model answers first and "unsure" escalates.

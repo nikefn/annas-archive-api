@@ -3,7 +3,7 @@ import * as store from "../../src/store.js";
 const MAX_LENGTH = 1000;
 const text = (v) => (typeof v === "string" && v.trim() ? v.trim().slice(0, MAX_LENGTH) : undefined);
 
-/** POST { input, title?, authors? } — queue a work; `litfetch run` processes it. */
+/** POST { input, title?, authors? }: queue a work for the next `litfetch run`. */
 export default async function handler(req, res) {
   const input = text(req.body?.input);
   if (!input) {

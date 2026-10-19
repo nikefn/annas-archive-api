@@ -9,7 +9,7 @@ import { client } from "../http.js";
 import { bareDoi, searchTerms, yearOf } from "./meta.js";
 
 const API = "https://export.arxiv.org/api/query";
-const http = client({ minIntervalMs: 3000 });
+const http = client();
 
 /** Parse an arXiv Atom feed into candidates. */
 export function parseFeed(xml) {

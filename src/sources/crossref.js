@@ -9,8 +9,7 @@ import { client } from "../http.js";
 import { bareDoi, pageCount, personName, yearOf } from "./meta.js";
 
 const API = "https://api.crossref.org";
-// Polite pool (with a contact email) allows more requests than the public one.
-const http = client({ minIntervalMs: config.email ? 350 : 1000 });
+const http = client();
 
 export function toCandidate(m) {
   const date = m.issued?.["date-parts"]?.[0]?.[0] ?? m.published?.["date-parts"]?.[0]?.[0];

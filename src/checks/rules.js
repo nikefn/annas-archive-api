@@ -8,13 +8,13 @@
  */
 
 import { ACCEPTED_FORMATS } from "./file.js";
-import { coverage, normalise, similarity, surname } from "../text.js";
+import { coverage, detectLanguage, normalise, surname, titleMatch } from "../text.js";
 
 const MIN_CHARS_PER_PAGE = 100; // below this a PDF is probably a scan without OCR
 const TITLE_PASS = 0.8; // share of title words found in the opening pages
 const TITLE_WARN = 0.5;
 const MIN_PAGE_SHARE = 0.5; // fewer pages than this share of the expected count = partial
-const SOURCES_AGREE = 0.7; // title similarity at which two sources describe the same work
+const MIN_PAGES = { book: 40, article: 2 }; // when the expected count is unknown
 const IDENTITY_PAGES = 5;
 
 const pass = (detail) => ({ status: "pass", detail });
@@ -37,6 +37,8 @@ export const RULES = [
     if (!doc.opened) return fail(doc.error || "could not be opened");
     return pass(doc.pages ? `${doc.pages} pages` : doc.pageTexts.length ? "parsed" : "header only");
   }],
+
+  ["drm", ({ doc }) => (doc.drm ? fail("DRM-protected EPUB") : null)],
 
   ["hash", ({ file, expected }) => {
     if (!expected.md5) return null;
@@ -76,10 +78,31 @@ export const RULES = [
       : warn(`${name} not found in opening pages`);
   }],
 
-  ["length", ({ doc, meta }) => {
-    if (!doc.pages || !meta.pages) return null;
-    const detail = `${doc.pages} of ${meta.pages} expected pages`;
-    return doc.pages < meta.pages * MIN_PAGE_SHARE ? fail(`${detail} (partial or preview?)`) : pass(detail);
+  ["length", ({ doc, meta, kind }) => {
+    if (!doc.pages) return null;
+    if (meta.pages) {
+      const detail = `${doc.pages} of ${meta.pages} expected pages`;
+      return doc.pages < meta.pages * MIN_PAGE_SHARE ? fail(`${detail} (partial or preview?)`) : pass(detail);
+    }
+    const min = MIN_PAGES[kind];
+    if (!min) return null;
+    return doc.pages < min ? fail(`${doc.pages} pages, a ${kind} needs ${min}`) : pass(`${doc.pages} pages`);
+  }],
+
+  // A chapter printed from an online platform carries "Page n of N" with N = its own page count.
+  ["printout", ({ doc, kind }) => {
+    if (kind !== "book" || !doc.pages) return null;
+    const printed = doc.pageTexts.some((t) =>
+      [...t.matchAll(/page \d+ of (\d+)/gi)].some((m) => Number(m[1]) === doc.pages)
+    );
+    return printed ? fail(`"Page n of ${doc.pages}" printout, not the book`) : null;
+  }],
+
+  ["language", ({ doc, language }) => {
+    if (!language) return null;
+    const found = detectLanguage(doc.pageTexts.join(" "));
+    if (!found) return null;
+    return found === language ? pass(found) : fail(`text is ${found}, work wants ${language}`);
   }],
 
   ["metadata-complete", ({ meta }) => {
@@ -91,8 +114,8 @@ export const RULES = [
     const described = candidates.filter((c) => c.meta.title);
     const off = described.filter(
       (c) =>
-        similarity(c.meta.title, meta.title) < SOURCES_AGREE ||
-        (c.meta.year && meta.year && Math.abs(c.meta.year - meta.year) > 1)
+        !titleMatch(meta.title, c.meta.title) ||
+        (c.tier === "same" && c.meta.year && meta.year && Math.abs(c.meta.year - meta.year) > 1)
     );
     if (off.length) return warn(`disagree: ${off.map((c) => c.source).join(", ")}`);
     const n = new Set(described.map((c) => c.source)).size;

@@ -1,8 +1,10 @@
 /**
  * Optional model triage for the one question the rules cannot always settle:
- * "is this file the work we asked for?". It only runs when the identity rule
- * warned and ANTHROPIC_API_KEY is set. Models are tried cheapest first
- * (LITFETCH_LLM_MODELS); an "unsure" answer or a refusal escalates to the next.
+ * "is this file the work we asked for?". Opt-in: it runs only when
+ * LITFETCH_LLM_MODELS lists models and ANTHROPIC_API_KEY is set, and then only
+ * for files whose identity check warned. The opening pages of such a file are
+ * sent to the Anthropic API. Models are tried in the listed order, cheapest
+ * first; an "unsure" answer or a refusal escalates to the next.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
